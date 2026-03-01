@@ -1,6 +1,9 @@
 mod bookmark;
 mod bookmark_graph;
 mod cli;
+mod forge;
+mod protos;
+mod store;
 
 use clap::Parser;
 use jj_cli::{cli_util::find_workspace_dir, config};

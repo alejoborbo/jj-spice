@@ -1,0 +1,31 @@
+// Copyright 2026 The jj-spice Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+
+syntax = "proto3";
+
+package change_request;
+
+// All change request mappings tracked by jj-spice.
+message ChangeRequests {
+  // Key: local jj bookmark name.
+  map<string, ForgeMeta> by_bookmark = 1;
+}
+
+// Wrapper for the forge-specific oneof.
+message ForgeMeta {
+  oneof forge {
+    GitHubMeta github = 10;
+  }
+}
+
+// GitHub Pull Request identity.
+message GitHubMeta {
+  uint64 number = 1;          // PR number
+  string source_branch = 2;   // head ref pushed to GitHub
+  string target_branch = 3;   // base ref (e.g. "main")
+  string source_repo = 4;     // fork origin (e.g. "user/repo"), empty for same-repo
+  string target_repo = 5;     // target repo (e.g. "owner/repo"), empty for same-repo
+  string graphql_id = 6;      // GraphQL node ID, for future mutation use
+}

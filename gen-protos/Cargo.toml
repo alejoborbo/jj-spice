@@ -1,0 +1,9 @@
+[package]
+name = "gen-protos"
+description = "Generate Protocol Buffers definitions for jj-spice"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+prost-build = "0.14"
