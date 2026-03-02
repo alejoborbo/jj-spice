@@ -1986,6 +1986,7 @@ dependencies = [
  "dunce",
  "jj-cli",
  "jj-lib",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

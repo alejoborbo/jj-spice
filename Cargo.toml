@@ -8,3 +8,4 @@ clap = { version = "4.5.60", features = ["derive"] }
 dunce = "1.0.5"
 jj-cli = "0.38.0"
 jj-lib = "0.38.0"
+thiserror = "2"
