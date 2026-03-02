@@ -18,10 +18,31 @@ use cli::Cli;
 
 fn main() {
     let config = setup_config().expect("Failed to load config");
+    let settings = UserSettings::from_config(config).expect("Failed to load user settings");
     let cli = Cli::parse();
 
+    let cwd = env::current_dir().and_then(dunce::canonicalize).unwrap();
+    let workspace_loader = DefaultWorkspaceLoaderFactory
+        .create(find_workspace_dir(&cwd))
+        .expect("Failed to find workspace");
+
+    let workspace = workspace_loader
+        .load(
+            &settings,
+            &StoreFactories::default(),
+            &default_working_copy_factories(),
+        )
+        .expect("Failed to load workspace");
+
+    let repo_loader = workspace.repo_loader();
+    let repo = repo_loader.load_at_head().expect("Failed to load repo");
+
     match cli.command {
-        cli::Commands::Submit => println!("Submit"),
+        cli::Commands::Submit => {
+            let graph = bookmark_graph::BookmarkGraph::new(repo.as_ref(), &workspace, "main")
+                .expect("Failed to build bookmark graph");
+            println!("{:?}", graph);
+        }
     };
 }
 
