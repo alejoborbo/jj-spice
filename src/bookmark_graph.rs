@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use jj_lib::{
     backend::CommitId,
+    dag_walk::topo_order_forward,
     graph::{GraphEdge, GraphNode, reverse_graph},
     repo::Repo,
     revset::{
@@ -22,6 +23,8 @@ pub enum BookmarkGraphError {
     RevsetResolution(#[from] RevsetResolutionError),
     #[error("no root commit found in branch")]
     NoRootCommit,
+    #[error("cycle detected in bookmark graph")]
+    Cycle,
 }
 
 #[derive(Debug)]
@@ -44,6 +47,23 @@ impl BookmarkGraph {
             nodes,
             head_bookmarks,
         })
+    }
+
+    pub fn iter_graph(&self) -> Result<impl Iterator<Item = &Bookmark>, BookmarkGraphError> {
+        let string_to_bookmark: HashMap<&str, &Bookmark> =
+            self.nodes.keys().map(|b| (b.name(), b)).collect();
+        let result = topo_order_forward(
+            self.heads().iter(),
+            |b| b.name(),
+            |&b| {
+                self.edges(b)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|e| *string_to_bookmark.get(e.target.as_str()).unwrap())
+            },
+            |_| BookmarkGraphError::Cycle,
+        )?;
+        Ok(result.into_iter())
     }
 
     pub fn edges(&self, bookmark: &Bookmark) -> Option<&[GraphEdge<String>]> {
