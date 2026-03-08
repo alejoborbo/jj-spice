@@ -1,15 +1,90 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
-#[derive(Parser, Debug)]
+/// jj-spice: forge integration for jj.
+#[derive(Parser, Clone, Debug)]
+#[command(name = "jj-spice")]
 pub struct Cli {
-    #[arg(short, long)]
-    verbose: bool,
-
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: SpiceCommand,
 }
 
-#[derive(Subcommand, Debug)]
-pub enum Commands {
+/// Top-level subcommands exposed by jj-spice.
+#[derive(Subcommand, Clone, Debug)]
+pub enum SpiceCommand {
+    /// Manage the bookmark stack.
+    Stack(StackArgs),
+}
+
+/// Arguments for the `stack` subcommand group.
+#[derive(Args, Clone, Debug)]
+pub struct StackArgs {
+    /// The stack operation to perform.
+    #[command(subcommand)]
+    pub command: StackCommand,
+}
+
+/// Operations available under `jj-spice stack`.
+#[derive(Subcommand, Clone, Debug)]
+pub enum StackCommand {
+    /// Submit the current stack of bookmarks for review.
     Submit,
+    /// Discover and track existing change requests for bookmarks in the stack.
+    Sync(SyncArgs),
+}
+
+/// Arguments for `jj-spice stack sync`.
+#[derive(Args, Clone, Debug)]
+pub struct SyncArgs {
+    /// Re-discover change requests even for bookmarks that are already tracked.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parse_stack_submit() {
+        let cli = Cli::try_parse_from(["jj-spice", "stack", "submit"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Submit
+            })
+        ));
+    }
+
+    #[test]
+    fn parse_stack_sync_without_force() {
+        let cli = Cli::try_parse_from(["jj-spice", "stack", "sync"]).unwrap();
+        match cli.command {
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Sync(args),
+            }) => assert!(!args.force),
+            _ => panic!("expected Sync"),
+        }
+    }
+
+    #[test]
+    fn parse_stack_sync_with_force() {
+        let cli = Cli::try_parse_from(["jj-spice", "stack", "sync", "--force"]).unwrap();
+        match cli.command {
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Sync(args),
+            }) => assert!(args.force),
+            _ => panic!("expected Sync"),
+        }
+    }
+
+    #[test]
+    fn parse_no_args_fails() {
+        assert!(Cli::try_parse_from(["jj-spice"]).is_err());
+    }
+
+    #[test]
+    fn parse_unknown_subcommand_fails() {
+        assert!(Cli::try_parse_from(["jj-spice", "stack", "unknown"]).is_err());
+    }
 }

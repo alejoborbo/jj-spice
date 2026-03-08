@@ -1,3 +1,4 @@
+/// Domain-specific store for bookmark → change request mappings.
 pub mod change_request;
 
 use std::fs;
@@ -6,10 +7,10 @@ use std::path::PathBuf;
 
 use jj_lib::file_util::persist_temp_file;
 use jj_lib::lock::FileLock;
-use jj_lib::workspace::Workspace;
 use prost::Message;
 use tempfile::NamedTempFile;
 
+/// Errors from protobuf-backed store I/O.
 #[derive(Debug, thiserror::Error)]
 pub enum SpiceStoreError {
     #[error("I/O error: {0}")]
@@ -32,17 +33,9 @@ pub struct SpiceStore {
 }
 
 impl SpiceStore {
-    /// Open or create the spice store directory.
-    ///
-    /// Creates `.jj/repo/spice/` under the given workspace's repo path.
-    pub fn init(workspace: &Workspace) -> Result<Self, SpiceStoreError> {
-        Self::init_at(workspace.repo_path())
-    }
-
     /// Open or create the spice store directory at a given repo path.
     ///
-    /// Prefer [`init`] when a [`Workspace`] is available. This constructor
-    /// exists for testing and cases where only a path is known.
+    /// Creates `.jj/repo/spice/` under the given path.
     pub(crate) fn init_at(repo_path: &std::path::Path) -> Result<Self, SpiceStoreError> {
         let dir = repo_path.join("spice");
         fs::create_dir_all(&dir)?;
@@ -138,5 +131,19 @@ mod tests {
         store.save("check.pb", &state).unwrap();
 
         assert!(tmp.path().join("spice").join("check.pb").exists());
+    }
+
+    #[test]
+    fn load_returns_decode_error_for_corrupted_data() {
+        let (tmp, store) = temp_store();
+
+        // Write garbage bytes to the file.
+        let path = tmp.path().join("spice").join("corrupted.pb");
+        std::fs::write(&path, b"\xff\xfe\xfd\xfc\x00\x01garbage").unwrap();
+
+        let result: Result<ChangeRequests, _> = store.load("corrupted.pb");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, SpiceStoreError::Decode(_)));
     }
 }

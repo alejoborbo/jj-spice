@@ -30,6 +30,7 @@ pub struct ChangeRequestStore<'a> {
 }
 
 impl<'a> ChangeRequestStore<'a> {
+    /// Create a new handle backed by the given [`SpiceStore`].
     pub fn new(store: &'a SpiceStore) -> Self {
         Self { store }
     }

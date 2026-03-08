@@ -2530,8 +2530,9 @@ name = "jj-spice"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "clap",
- "dunce",
+ "gix",
  "jj-cli",
  "jj-lib",
  "octocrab",

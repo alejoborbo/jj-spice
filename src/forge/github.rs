@@ -29,12 +29,11 @@ pub fn resolve_github_token() -> Option<String> {
         })
 }
 
+/// Errors specific to the GitHub forge backend.
 #[derive(Debug)]
 pub enum GitHubError {
     /// Error returned by the GitHub API via octocrab.
     Api(octocrab::Error),
-    /// Invalid change request identifier (expected a numeric PR number).
-    InvalidId(String),
     /// The provided `ForgeMeta` is not a GitHub variant.
     WrongForge,
     /// No GitHub token could be resolved.
@@ -45,7 +44,6 @@ impl fmt::Display for GitHubError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             GitHubError::Api(e) => write!(f, "GitHub API error: {e}"),
-            GitHubError::InvalidId(id) => write!(f, "invalid PR number: {id}"),
             GitHubError::WrongForge => write!(f, "expected GitHub metadata, got a different forge"),
             GitHubError::MissingToken => write!(
                 f,
@@ -93,7 +91,7 @@ impl ChangeRequest for GitHubChangeRequest {
     }
 
     fn status(&self) -> ChangeStatus {
-        self.status.clone()
+        self.status
     }
 
     fn url(&self) -> &str {
@@ -113,6 +111,7 @@ impl ChangeRequest for GitHubChangeRequest {
     }
 }
 
+/// GitHub / GitHub Enterprise forge backend backed by [`Octocrab`].
 pub struct GitHubForge {
     client: Octocrab,
     owner: String,
@@ -674,5 +673,32 @@ mod tests {
 
         let err = forge.get(&meta).await.unwrap_err();
         assert!(matches!(err, GitHubError::WrongForge));
+    }
+
+    // -- GitHubError Display tests --
+
+    #[test]
+    fn github_error_display_wrong_forge() {
+        let err = GitHubError::WrongForge;
+        assert_eq!(
+            err.to_string(),
+            "expected GitHub metadata, got a different forge"
+        );
+    }
+
+    #[test]
+    fn github_error_display_missing_token() {
+        let err = GitHubError::MissingToken;
+        assert_eq!(
+            err.to_string(),
+            "no GitHub token found (checked GH_TOKEN, GITHUB_TOKEN, gh auth token)"
+        );
+    }
+
+    #[test]
+    fn github_error_source_is_none_for_non_api_variants() {
+        use std::error::Error;
+        assert!(GitHubError::WrongForge.source().is_none());
+        assert!(GitHubError::MissingToken.source().is_none());
     }
 }
