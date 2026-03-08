@@ -1,8 +1,20 @@
+use clap::builder::styling::AnsiColor;
+use clap::builder::Styles;
 use clap::{Args, Parser, Subcommand};
+
+/// Colour theme matching jj-cli's help output.
+///
+/// Copied from jj-cli (where the constant is crate-private) so that
+/// `jj-spice --help` looks visually consistent with `jj --help`.
+const STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Yellow.on_default().bold())
+    .usage(AnsiColor::Yellow.on_default().bold())
+    .literal(AnsiColor::Green.on_default().bold())
+    .placeholder(AnsiColor::Green.on_default());
 
 /// jj-spice: forge integration for jj.
 #[derive(Parser, Clone, Debug)]
-#[command(name = "jj-spice")]
+#[command(name = "jj-spice", styles = STYLES)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: SpiceCommand,
