@@ -5,55 +5,45 @@ mod forge;
 mod protos;
 mod store;
 
-use clap::Parser;
-use jj_cli::{cli_util::find_workspace_dir, config};
-use jj_lib::{
-    config::{ConfigGetError, StackedConfig},
-    repo::StoreFactories,
-    settings::UserSettings,
-    workspace::{
-        DefaultWorkspaceLoaderFactory, WorkspaceLoaderFactory, default_working_copy_factories,
-    },
-};
-use std::env;
+use jj_cli::cli_util::{CliRunner, CommandHelper, RevisionArg};
+use jj_cli::command_error::{CommandError, CommandErrorKind};
+use jj_cli::ui::Ui;
 
-use cli::Cli;
+use cli::SpiceCommand;
 
-fn main() {
-    let config = setup_config().expect("Failed to load config");
-    let settings = UserSettings::from_config(config).expect("Failed to load user settings");
-    let cli = Cli::parse();
+fn run(ui: &mut Ui, command: &CommandHelper, args: SpiceCommand) -> Result<(), CommandError> {
+    match args {
+        SpiceCommand::Submit => {
+            let workspace_command = command.workspace_helper(ui)?;
 
-    let cwd = env::current_dir().and_then(dunce::canonicalize).unwrap();
-    let workspace_loader = DefaultWorkspaceLoaderFactory
-        .create(find_workspace_dir(&cwd))
-        .expect("Failed to find workspace");
+            // Resolve trunk() and @ through the full alias system.
+            let trunk_revset = RevisionArg::from("trunk()".to_string());
+            let trunk_commit = workspace_command.resolve_single_rev(ui, &trunk_revset)?;
 
-    let workspace = workspace_loader
-        .load(
-            &settings,
-            &StoreFactories::default(),
-            &default_working_copy_factories(),
-        )
-        .expect("Failed to load workspace");
+            let wc_revset = RevisionArg::from("@".to_string());
+            let wc_commit = workspace_command.resolve_single_rev(ui, &wc_revset)?;
 
-    let repo_loader = workspace.repo_loader();
-    let repo = repo_loader.load_at_head().expect("Failed to load repo");
+            let repo = workspace_command.repo().clone();
 
-    match cli.command {
-        cli::Commands::Submit => {
-            let graph = bookmark_graph::BookmarkGraph::new(repo.as_ref(), &workspace, "main")
-                .expect("Failed to build bookmark graph");
-            graph.iter_graph().unwrap().for_each(|b| {
-                println!("{}", b.name());
-            });
+            let graph = bookmark_graph::BookmarkGraph::new(
+                repo.as_ref(),
+                trunk_commit.id(),
+                wc_commit.id(),
+            )
+            .map_err(|e| CommandError::new(CommandErrorKind::User, e))?;
+
+            graph
+                .iter_graph()
+                .map_err(|e| CommandError::new(CommandErrorKind::User, e))?
+                .for_each(|b| {
+                    println!("{}", b.name());
+                });
+
+            Ok(())
         }
-    };
+    }
 }
 
-fn setup_config() -> Result<StackedConfig, ConfigGetError> {
-    let mut config_layers = config::default_config_layers();
-    let raw_config = config::config_from_environment(config_layers.drain(..));
-    let config_env = config::ConfigEnv::from_environment();
-    config_env.resolve_config(&raw_config)
+fn main() -> std::process::ExitCode {
+    CliRunner::init().add_subcommand(run).run().into()
 }

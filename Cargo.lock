@@ -2531,7 +2531,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "clap",
- "dunce",
  "jj-cli",
  "jj-lib",
  "octocrab",

@@ -6,11 +6,7 @@ use jj_lib::{
     git::REMOTE_NAME_FOR_LOCAL_GIT_REPO,
     graph::{GraphEdge, GraphNode, reverse_graph},
     repo::Repo,
-    revset::{
-        Revset, RevsetEvaluationError, RevsetExpression, RevsetExtensions, RevsetResolutionError,
-        SymbolResolver, UserRevsetExpression,
-    },
-    workspace::Workspace,
+    revset::{RevsetEvaluationError, RevsetExpression},
 };
 use thiserror::Error;
 
@@ -20,8 +16,6 @@ use crate::bookmark::{Bookmark, RemoteTracking};
 pub enum BookmarkGraphError {
     #[error("revset evaluation failed")]
     RevsetEvaluation(#[from] RevsetEvaluationError),
-    #[error("revset resolution failed")]
-    RevsetResolution(#[from] RevsetResolutionError),
     #[error("no root commit found in branch")]
     NoRootCommit,
     #[error("cycle detected in bookmark graph")]
@@ -35,13 +29,18 @@ pub struct BookmarkGraph {
 }
 
 impl BookmarkGraph {
+    /// Build a bookmark graph from commits between `trunk` and `head`.
+    ///
+    /// Both should be pre-resolved commit IDs. Typically `trunk` comes from
+    /// evaluating the `trunk()` revset alias, and `head` is the working-copy
+    /// commit (`@`).
     pub fn new(
         repo: &dyn Repo,
-        workspace: &Workspace,
-        trunk_name: &str,
+        trunk: &CommitId,
+        head: &CommitId,
     ) -> Result<Self, BookmarkGraphError> {
         let bookmarks_per_commit = Self::build_bookmark_commit_map(repo);
-        let reversed = Self::build_reversed_commit_graph(repo, workspace, trunk_name)?;
+        let reversed = Self::evaluate_branch_commits(repo, trunk, head)?;
         let nodes = Self::build_bookmark_graph(&reversed, &bookmarks_per_commit);
         let head_bookmarks = Self::find_head_bookmarks(&nodes);
         Ok(Self {
@@ -79,22 +78,15 @@ impl BookmarkGraph {
         self.nodes.keys()
     }
 
-    fn symbol_resolver(repo: &dyn Repo) -> SymbolResolver<'_> {
-        SymbolResolver::new(repo, RevsetExtensions::default().symbol_resolvers())
-    }
-
     fn find_root_commit(
         repo: &dyn Repo,
-        workspace: &Workspace,
-        trunk_name: &str,
+        trunk: &CommitId,
+        head: &CommitId,
     ) -> Result<CommitId, BookmarkGraphError> {
-        let trunk = UserRevsetExpression::symbol(trunk_name.to_string());
-        let wc = RevsetExpression::working_copy(workspace.workspace_name().to_owned());
-        let branch_commits = trunk.range(&wc);
-        let first_mutable = branch_commits
-            .roots()
-            .resolve_user_expression(repo, &Self::symbol_resolver(repo))?;
-        let expression = first_mutable.evaluate(repo)?;
+        let trunk_expr = RevsetExpression::commit(trunk.clone());
+        let head_expr = RevsetExpression::commit(head.clone());
+        let roots = trunk_expr.range(&head_expr).roots();
+        let expression = roots.evaluate(repo)?;
         expression
             .iter()
             .next()
@@ -102,14 +94,15 @@ impl BookmarkGraph {
             .ok_or(BookmarkGraphError::NoRootCommit)
     }
 
-    fn evaluate_branch_commits<'a>(
-        repo: &'a dyn Repo,
-        workspace: &Workspace,
-        trunk_name: &str,
-    ) -> Result<Box<dyn Revset + 'a>, BookmarkGraphError> {
-        let first_commit = Self::find_root_commit(repo, workspace, trunk_name)?;
+    fn evaluate_branch_commits(
+        repo: &dyn Repo,
+        trunk: &CommitId,
+        head: &CommitId,
+    ) -> Result<Vec<GraphNode<CommitId>>, BookmarkGraphError> {
+        let first_commit = Self::find_root_commit(repo, trunk, head)?;
         let expression = RevsetExpression::commit(first_commit).descendants();
-        Ok(expression.evaluate(repo)?)
+        let revset = expression.evaluate(repo)?;
+        Ok(reverse_graph(revset.iter_graph(), |id| id).expect("commit graph should be acyclic"))
     }
 
     fn build_bookmark_commit_map(repo: &dyn Repo) -> HashMap<CommitId, Bookmark> {
@@ -132,15 +125,6 @@ impl BookmarkGraph {
             }
         });
         map
-    }
-
-    fn build_reversed_commit_graph(
-        repo: &dyn Repo,
-        workspace: &Workspace,
-        trunk_name: &str,
-    ) -> Result<Vec<GraphNode<CommitId>>, BookmarkGraphError> {
-        let revset = Self::evaluate_branch_commits(repo, workspace, trunk_name)?;
-        Ok(reverse_graph(revset.iter_graph(), |id| id).expect("commit graph should be acyclic"))
     }
 
     fn build_bookmark_graph(
