@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use jj_lib::{
     backend::CommitId,
     dag_walk::topo_order_forward,
+    git::REMOTE_NAME_FOR_LOCAL_GIT_REPO,
     graph::{GraphEdge, GraphNode, reverse_graph},
     repo::Repo,
     revset::{
@@ -13,7 +14,7 @@ use jj_lib::{
 };
 use thiserror::Error;
 
-use crate::bookmark::Bookmark;
+use crate::bookmark::{Bookmark, RemoteTracking};
 
 #[derive(Debug, Error)]
 pub enum BookmarkGraphError {
@@ -115,8 +116,19 @@ impl BookmarkGraph {
         let mut map = HashMap::new();
         repo.view().bookmarks().for_each(|(ref_name, ref_target)| {
             if let Some(commit_id) = ref_target.local_target.as_normal() {
-                map.entry(commit_id.clone())
-                    .or_insert_with(|| Bookmark::new(ref_name.as_str().to_string()));
+                let remotes: Vec<RemoteTracking> = ref_target
+                    .remote_refs
+                    .iter()
+                    .filter(|(remote_name, _)| *remote_name != REMOTE_NAME_FOR_LOCAL_GIT_REPO)
+                    .map(|(remote_name, remote_ref)| RemoteTracking {
+                        remote_name: remote_name.as_str().to_string(),
+                        is_tracked: remote_ref.is_tracked(),
+                    })
+                    .collect();
+
+                map.entry(commit_id.clone()).or_insert_with(|| {
+                    Bookmark::with_remotes(ref_name.as_str().to_string(), remotes)
+                });
             }
         });
         map
