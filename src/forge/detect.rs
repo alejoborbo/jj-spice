@@ -9,6 +9,10 @@ use thiserror::Error;
 use super::github::GitHubForge;
 use super::Forge;
 
+/// Supported forge type identifiers for interactive selection and config
+/// persistence.
+pub const FORGE_TYPES: &[&str] = &["github"];
+
 /// Intermediate detection result before constructing a forge client.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum DetectedForge {
@@ -17,6 +21,28 @@ enum DetectedForge {
         repo: String,
         base_uri: Option<String>,
     },
+}
+
+/// A remote whose hostname did not match any known forge but whose URL path
+/// could be parsed into an owner/repo pair.
+#[derive(Clone, Debug)]
+pub struct UnmatchedRemote {
+    /// Git remote name (e.g. `"origin"`).
+    pub remote_name: String,
+    /// Hostname extracted from the remote URL.
+    pub hostname: String,
+    /// Repository owner parsed from the URL path.
+    pub owner: String,
+    /// Repository name parsed from the URL path.
+    pub repo: String,
+}
+
+/// Result of [`detect_forges`], separating matched and unmatched remotes.
+pub struct DetectionResult {
+    /// Remotes successfully matched to a forge backend.
+    pub forges: HashMap<String, Box<dyn Forge>>,
+    /// Remotes with a parseable owner/repo but no recognised forge hostname.
+    pub unmatched: Vec<UnmatchedRemote>,
 }
 
 /// Errors that can occur when detecting forges from git remotes.
@@ -35,17 +61,19 @@ pub enum ForgeDetectionError {
 
 /// Detect the forge type for each git remote and construct a client.
 ///
-/// Returns a map from remote name → [`Forge`] implementation. Remotes whose
-/// URLs cannot be parsed or matched to a known forge are silently skipped.
+/// Returns a [`DetectionResult`] containing:
+/// - `forges`: remote name → [`Forge`] for remotes matched to a known forge.
+/// - `unmatched`: remotes with a parseable owner/repo but no recognised host.
 ///
 /// GitHub Enterprise hosts are detected via the jj config key
 /// `spice.forges.<hostname>.type = "github"`.
 pub fn detect_forges(
     store: &Store,
     config: &StackedConfig,
-) -> Result<HashMap<String, Box<dyn Forge>>, ForgeDetectionError> {
+) -> Result<DetectionResult, ForgeDetectionError> {
     let git_repo = get_git_repo(store)?;
-    let mut result = HashMap::new();
+    let mut forges = HashMap::new();
+    let mut unmatched = Vec::new();
 
     for name in git_repo.remote_names() {
         let name_str = match std::str::from_utf8(name.as_ref()) {
@@ -68,16 +96,31 @@ pub fn detect_forges(
             None => continue,
         };
 
-        let detected = match detect_forge_from_host(host, url.path.as_ref(), config) {
-            Some(d) => d,
-            None => continue,
-        };
-
-        let forge = build_forge(name_str, detected)?;
-        result.insert(name_str.to_string(), forge);
+        match detect_forge_from_host(host, url.path.as_ref(), config) {
+            Some(detected) => {
+                let forge = build_forge(name_str, detected)?;
+                forges.insert(name_str.to_string(), forge);
+            }
+            None => {
+                // Host unrecognised — record for potential interactive prompt
+                // if the URL path yields a valid owner/repo.
+                let path_str = match std::str::from_utf8(url.path.as_ref()) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                if let Some((owner, repo)) = parse_owner_repo(path_str) {
+                    unmatched.push(UnmatchedRemote {
+                        remote_name: name_str.to_string(),
+                        hostname: host.to_string(),
+                        owner,
+                        repo,
+                    });
+                }
+            }
+        }
     }
 
-    Ok(result)
+    Ok(DetectionResult { forges, unmatched })
 }
 
 /// Construct a [`Forge`] implementation from a [`DetectedForge`].
@@ -100,6 +143,42 @@ fn build_forge(
             })?;
             Ok(Box::new(forge))
         }
+    }
+}
+
+/// Construct a [`Forge`] from a user-selected forge type string and remote
+/// metadata.
+///
+/// This is the public counterpart of [`build_forge`], used after interactive
+/// prompts to construct a forge client for a previously-unmatched remote.
+pub fn build_forge_for_type(
+    remote: &str,
+    forge_type: &str,
+    owner: &str,
+    repo: &str,
+    hostname: &str,
+) -> Result<Box<dyn Forge>, ForgeDetectionError> {
+    match forge_type {
+        "github" => {
+            let base_uri = if hostname == "github.com" {
+                None
+            } else {
+                Some(format!("https://{hostname}/api/v3"))
+            };
+            let forge = GitHubForge::new(owner, repo, base_uri.as_deref()).map_err(|e| {
+                ForgeDetectionError::ForgeCreation {
+                    remote: remote.to_string(),
+                    forge_type: "GitHub",
+                    source: Box::new(e),
+                }
+            })?;
+            Ok(Box::new(forge))
+        }
+        other => Err(ForgeDetectionError::ForgeCreation {
+            remote: remote.to_string(),
+            forge_type: "unknown",
+            source: format!("unsupported forge type: {other}").into(),
+        }),
     }
 }
 
@@ -278,4 +357,39 @@ mod tests {
             Some(("owner".into(), "repo.git.bak".into()))
         );
     }
+
+    // -- FORGE_TYPES --
+
+    #[test]
+    fn forge_types_contains_github() {
+        assert!(FORGE_TYPES.contains(&"github"));
+    }
+
+    // -- build_forge_for_type --
+
+    #[tokio::test]
+    async fn build_forge_for_type_github_dot_com() {
+        let result = build_forge_for_type("origin", "github", "acme", "widget", "github.com");
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn build_forge_for_type_github_enterprise() {
+        let result =
+            build_forge_for_type("upstream", "github", "acme", "widget", "git.corp.example.com");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn build_forge_for_type_unsupported() {
+        let result = build_forge_for_type("origin", "gitlab", "acme", "widget", "gitlab.com");
+        let Err(err) = result else {
+            panic!("expected an error for unsupported forge type");
+        };
+        assert!(
+            err.to_string().contains("unsupported forge type"),
+            "unexpected error: {err}"
+        );
+    }
+
 }

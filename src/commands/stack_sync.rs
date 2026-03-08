@@ -3,13 +3,16 @@ use std::io::Write;
 
 use jj_cli::ui::Ui;
 use jj_lib::backend::CommitId;
+use jj_lib::config::{ConfigFile, ConfigSource};
 use jj_lib::repo::Repo;
 
 use crate::bookmark::Bookmark;
 use crate::bookmark_graph::{BookmarkGraph, BookmarkNode};
-use crate::commands::env::SpiceEnv;
+use crate::commands::env::{SpiceEnv, cmd_err};
 use crate::forge::Forge;
-use crate::forge::detect::detect_forges;
+use crate::forge::detect::{
+    DetectionResult, UnmatchedRemote, FORGE_TYPES, build_forge_for_type, detect_forges,
+};
 use crate::protos::change_request::ForgeMeta;
 use crate::protos::change_request::forge_meta::Forge as ForgeOneof;
 use crate::store::SpiceStore;
@@ -33,6 +36,10 @@ enum BookmarkSyncError {
 /// For each bookmark between trunk and the working copy, queries the detected
 /// forges for existing change requests and persists their identity metadata
 /// locally.
+///
+/// When remotes are found with parseable URLs but no recognised forge hostname,
+/// the user is prompted (once per unique hostname) to select a forge type.
+/// The choice is persisted to the jj repo config so future runs skip the prompt.
 pub async fn run(
     env: &SpiceEnv,
     trunk: &CommitId,
@@ -40,7 +47,14 @@ pub async fn run(
     force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let graph = BookmarkGraph::new(env.repo.as_ref(), trunk, head)?;
-    let forge_map = detect_forges(env.repo.store(), env.config())?;
+    let DetectionResult {
+        mut forges,
+        unmatched,
+    } = detect_forges(env.repo.store(), env.config())?;
+
+    // Prompt for unmatched remotes (grouped by hostname).
+    resolve_unmatched_remotes(env, &unmatched, &mut forges)?;
+
     let spice_store = SpiceStore::init_at(env.workspace.repo_path())?;
     let cr_store = ChangeRequestStore::new(&spice_store);
     let mut state = cr_store.load()?;
@@ -60,7 +74,7 @@ pub async fn run(
             continue;
         }
 
-        match sync_bookmark(&env.ui, bookmark, &forge_map).await {
+        match sync_bookmark(&env.ui, bookmark, &forges).await {
             Ok(Some(meta)) => {
                 state.set(name.to_string(), meta);
                 writeln!(env.ui.status(), "{name}: tracked")?;
@@ -75,6 +89,117 @@ pub async fn run(
     }
 
     cr_store.save(&state)?;
+    Ok(())
+}
+
+/// Prompt the user once per unique hostname and construct forge clients for
+/// unmatched remotes.
+///
+/// Persists the selected forge type to the jj repo config at
+/// `spice.forges.<hostname>.type` so subsequent runs auto-detect.
+fn resolve_unmatched_remotes(
+    env: &SpiceEnv,
+    unmatched: &[UnmatchedRemote],
+    forges: &mut HashMap<String, Box<dyn Forge>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if unmatched.is_empty() {
+        return Ok(());
+    }
+
+    // Group by hostname so we only prompt once per unique host.
+    let mut by_host: HashMap<&str, Vec<&UnmatchedRemote>> = HashMap::new();
+    for remote in unmatched {
+        by_host.entry(&remote.hostname).or_default().push(remote);
+    }
+
+    // Build choice labels: forge types + a skip sentinel.
+    let mut choices: Vec<&str> = FORGE_TYPES.to_vec();
+    choices.push("(skip)");
+    let skip_index = choices.len() - 1;
+
+    for (hostname, remotes) in &by_host {
+        let remote_names: Vec<&str> = remotes.iter().map(|r| r.remote_name.as_str()).collect();
+        let prompt_msg = format!(
+            "Remote{} {} ({hostname}): select forge type",
+            if remote_names.len() > 1 { "s" } else { "" },
+            remote_names.join(", "),
+        );
+
+        let selected = match env.ui.prompt_choice(&prompt_msg, &choices, Some(skip_index)) {
+            Ok(idx) => idx,
+            Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                // Non-interactive terminal — skip gracefully.
+                writeln!(
+                    env.ui.warning_default(),
+                    "{hostname}: skipping forge selection (non-interactive terminal)"
+                )?;
+                continue;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                // EOF on stdin — skip gracefully.
+                writeln!(
+                    env.ui.warning_default(),
+                    "{hostname}: skipping forge selection (EOF)"
+                )?;
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        if selected == skip_index {
+            continue;
+        }
+
+        let forge_type = choices[selected];
+
+        // Persist the choice to jj repo config.
+        persist_forge_config(env, hostname, forge_type)?;
+
+        // Construct a forge client for each remote with this hostname.
+        for remote in remotes {
+            let forge = build_forge_for_type(
+                &remote.remote_name,
+                forge_type,
+                &remote.owner,
+                &remote.repo,
+                hostname,
+            )?;
+            forges.insert(remote.remote_name.clone(), forge);
+        }
+    }
+
+    Ok(())
+}
+
+/// Write `spice.forges.<hostname>.type = <forge_type>` to the jj repo config.
+fn persist_forge_config(
+    env: &SpiceEnv,
+    hostname: &str,
+    forge_type: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config_path = match env.config_env.repo_config_path(&env.ui).map_err(cmd_err)? {
+        Some(p) => p,
+        None => {
+            writeln!(
+                env.ui.warning_default(),
+                "{hostname}: could not determine repo config path, forge choice not persisted"
+            )?;
+            return Ok(());
+        }
+    };
+
+    let mut config_file = ConfigFile::load_or_empty(ConfigSource::Repo, config_path)?;
+    config_file.set_value(
+        &["spice", "forges", hostname, "type"][..],
+        forge_type,
+    )?;
+    config_file.save()?;
+
+    writeln!(
+        env.ui.status(),
+        "{hostname}: saved as {forge_type} in repo config"
+    )?;
+
     Ok(())
 }
 

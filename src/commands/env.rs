@@ -26,6 +26,8 @@ pub(crate) struct SpiceEnv {
     pub(crate) settings: UserSettings,
     /// Open workspace (working copy + repo loader).
     pub(crate) workspace: Workspace,
+    /// Configuration environment for locating config files (e.g. repo config).
+    pub(crate) config_env: ConfigEnv,
     path_converter: RepoPathUiConverter,
     user_email: String,
     revset_aliases: RevsetAliasesMap,
@@ -38,7 +40,7 @@ impl SpiceEnv {
         let cwd = std::env::current_dir()?;
 
         // 1. Load the full jj config stack (defaults + user + repo + workspace).
-        let (config, ui, workspace_root) = load_config(&cwd)?;
+        let (config, ui, workspace_root, config_env) = load_config(&cwd)?;
 
         // 2. Load workspace + repo via jj-lib.
         let settings = UserSettings::from_config(config.clone())?;
@@ -66,6 +68,7 @@ impl SpiceEnv {
             repo,
             settings,
             workspace,
+            config_env,
             path_converter,
             user_email,
             revset_aliases,
@@ -132,9 +135,19 @@ impl SpiceEnv {
 /// Load the full jj config stack and locate the workspace root.
 ///
 /// Uses jj-cli's public config pipeline: defaults → user → repo → workspace.
+/// Returns the resolved config, UI, workspace root, and the [`ConfigEnv`] so
+/// callers can later locate config files for writing.
 fn load_config(
     cwd: &std::path::Path,
-) -> Result<(jj_lib::config::StackedConfig, Ui, std::path::PathBuf), Box<dyn std::error::Error>> {
+) -> Result<
+    (
+        jj_lib::config::StackedConfig,
+        Ui,
+        std::path::PathBuf,
+        ConfigEnv,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let mut config_env = ConfigEnv::from_environment();
     let mut raw_config = config_from_environment(default_config_layers());
     config_env.reload_user_config(&mut raw_config)?;
@@ -162,7 +175,7 @@ fn load_config(
 
     let config = config_env.resolve_config(&raw_config)?;
     let ui = Ui::with_config(&config).map_err(cmd_err)?;
-    Ok((config, ui, workspace_root))
+    Ok((config, ui, workspace_root, config_env))
 }
 
 /// Convert a [`jj_cli::command_error::CommandError`] to a boxed std error.
