@@ -14,8 +14,8 @@ use cli::SpiceCommand;
 
 fn run(ui: &mut Ui, command: &CommandHelper, args: SpiceCommand) -> Result<(), CommandError> {
     match args {
-        SpiceCommand::Submit => cmd_submit(ui, command),
         SpiceCommand::Stack(stack_args) => match stack_args.command {
+            cli::StackCommand::Submit => cmd_submit(ui, command),
             cli::StackCommand::Sync(sync_args) => cmd_stack_sync(ui, command, sync_args.force),
         },
     }

@@ -6,8 +6,6 @@ use clap::{Args, Subcommand};
 /// (config, revset aliases, workspace loading) is available.
 #[derive(Subcommand, Clone, Debug)]
 pub enum SpiceCommand {
-    /// Submit the current stack of bookmarks for review.
-    Submit,
     /// Manage the bookmark stack.
     Stack(StackArgs),
 }
@@ -20,6 +18,8 @@ pub struct StackArgs {
 
 #[derive(Subcommand, Clone, Debug)]
 pub enum StackCommand {
+    /// Submit the current stack of bookmarks for review.
+    Submit,
     /// Discover and track existing change requests for bookmarks in the stack.
     Sync(SyncArgs),
 }
