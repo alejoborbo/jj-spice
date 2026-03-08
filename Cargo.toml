@@ -9,6 +9,7 @@ edition = "2024"
 [dependencies]
 async-trait = "0.1"
 clap = { version = "4.5.60", features = ["derive"] }
+gix = { version = "0.78.0", default-features = false }
 jj-cli = "0.38.0"
 jj-lib = "0.38.0"
 octocrab = "0.49.5"

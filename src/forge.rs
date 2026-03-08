@@ -1,3 +1,4 @@
+pub mod detect;
 pub mod github;
 
 use crate::protos::change_request::ForgeMeta;
