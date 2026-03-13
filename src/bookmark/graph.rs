@@ -198,13 +198,8 @@ impl BookmarkGraph {
                 if !nodes.contains_key(&name) {
                     let mut node = BookmarkNode::new(bookmark.clone());
 
-                    // Ascendants = parent's ascendants + parent
+                    // Record only the direct parent bookmark.
                     if let Some(pn) = parent_name {
-                        if let Some(parent_node) = nodes.get(pn) {
-                            for asc in parent_node.ascendants() {
-                                node.add_ascendant(asc.clone());
-                            }
-                        }
                         node.add_ascendant(pn.to_string());
                     }
 
