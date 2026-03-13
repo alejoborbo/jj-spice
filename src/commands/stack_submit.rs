@@ -44,22 +44,16 @@ pub async fn run(
             bookmark.name()
         )?;
 
-        let base_bookmark = if ascendants.len() > 1 {
-            let mut formatter = env.ui.stdout_formatter();
-            for (i, name) in ascendants.iter().enumerate() {
-                writeln!(formatter, "{}: {}", i + 1, name)?;
+        let base_bookmark = match ascendants.len() {
+            0 => trunk_name,
+            1 => ascendants.first().unwrap().as_str(),
+            _ => {
+                let choices: Vec<String> = (1..=ascendants.len()).map(|i| i.to_string()).collect();
+                let index = env
+                    .ui
+                    .prompt_choice("Select base bookmark", &choices, None)?;
+                ascendants[index].as_str()
             }
-            drop(formatter);
-
-            let choices: Vec<String> = (1..=ascendants.len()).map(|i| i.to_string()).collect();
-            let index = env
-                .ui
-                .prompt_choice("Select base bookmark", &choices, None)?;
-            ascendants[index].as_str()
-        } else if let Some(b) = ascendants.first() {
-            b.as_str()
-        } else {
-            trunk_name
         };
 
         writeln!(
