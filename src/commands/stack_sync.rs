@@ -14,7 +14,6 @@ use crate::forge::detect::{
     DetectionResult, UnmatchedRemote, FORGE_TYPES, build_forge_for_type, detect_forges,
 };
 use crate::protos::change_request::ForgeMeta;
-use crate::protos::change_request::forge_meta::Forge as ForgeOneof;
 use crate::store::SpiceStore;
 use crate::store::change_request::ChangeRequestStore;
 
@@ -245,43 +244,30 @@ async fn sync_bookmark(
         1 => Ok(Some(all_crs.into_iter().next().unwrap())),
         _ => {
             // Multiple CRs found — prompt user to select one.
-            let labels: Vec<String> = all_crs.iter().map(format_forge_meta).collect();
-
-            let index = ui.prompt_choice(
-                &format!(
-                    "{}: found {} change requests, which should be tracked?",
-                    bookmark.name(),
-                    all_crs.len()
-                ),
-                &labels,
-                Some(0),
+            writeln!(
+                ui.status(),
+                "{}: found {} change requests, which should be tracked?",
+                bookmark.name(),
+                all_crs.len()
             )?;
+            for (i, cr) in all_crs.iter().enumerate() {
+                writeln!(ui.status(), "  {i}: {cr}")?;
+            }
+
+            let choices: Vec<String> = (0..all_crs.len()).map(|i| i.to_string()).collect();
+            let index = ui.prompt_choice("Select", &choices, Some(0))?;
 
             Ok(Some(all_crs.into_iter().nth(index).unwrap()))
         }
     }
 }
 
-/// Format a `ForgeMeta` for display in a selection prompt.
-fn format_forge_meta(meta: &ForgeMeta) -> String {
-    match &meta.forge {
-        Some(ForgeOneof::Github(gh)) => {
-            format!(
-                "GitHub PR #{} ({} → {})",
-                gh.number, gh.source_branch, gh.target_branch
-            )
-        }
-        None => "unknown forge".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::protos::change_request::GitHubMeta;
+    use crate::protos::change_request::{ForgeMeta, GitHubMeta, forge_meta::Forge as ForgeOneof};
 
     #[test]
-    fn format_forge_meta_github_variant() {
+    fn forge_meta_display_github_variant() {
         let meta = ForgeMeta {
             forge: Some(ForgeOneof::Github(GitHubMeta {
                 number: 42,
@@ -292,12 +278,12 @@ mod tests {
                 graphql_id: String::new(),
             })),
         };
-        assert_eq!(format_forge_meta(&meta), "GitHub PR #42 (feat → main)");
+        assert_eq!(meta.to_string(), "GitHub PR #42 (feat → main)");
     }
 
     #[test]
-    fn format_forge_meta_none_variant() {
+    fn forge_meta_display_none_variant() {
         let meta = ForgeMeta { forge: None };
-        assert_eq!(format_forge_meta(&meta), "unknown forge");
+        assert_eq!(meta.to_string(), "unknown forge");
     }
 }

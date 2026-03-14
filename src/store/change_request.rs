@@ -1,3 +1,5 @@
+use std::fmt;
+
 use crate::protos::change_request::{ChangeRequests, ForgeMeta, forge_meta::Forge as ForgeOneof};
 
 use super::{SpiceStore, SpiceStoreError};
@@ -10,6 +12,17 @@ impl ForgeMeta {
         match &self.forge {
             Some(ForgeOneof::Github(gh)) => Some(&gh.target_branch),
             None => None,
+        }
+    }
+}
+
+impl fmt::Display for ForgeMeta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.forge {
+            Some(ForgeOneof::Github(gh)) => {
+                write!(f, "GitHub PR #{} ({} → {})", gh.number, gh.source_branch, gh.target_branch)
+            }
+            None => write!(f, "unknown forge"),
         }
     }
 }
