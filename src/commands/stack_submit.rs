@@ -32,10 +32,16 @@ pub async fn run(
             0 => trunk_name,
             1 => ascendants.first().unwrap().as_str(),
             _ => {
-                let choices: Vec<String> = (1..=ascendants.len()).map(|i| i.to_string()).collect();
+                writeln!(env.ui.stdout_formatter(), "Multiple base bookmarks found:")?;
+                for (i, a) in ascendants.iter().enumerate() {
+                    writeln!(env.ui.stdout_formatter(), "  {}: {}", i, a)?;
+                }
+
+                let choices: Vec<String> = (0..ascendants.len()).map(|i| i.to_string()).collect();
                 let index = env
                     .ui
-                    .prompt_choice("Select base bookmark", &choices, None)?;
+                    .prompt_choice("Select base bookmark", &choices, Some(0))?;
+
                 ascendants[index].as_str()
             }
         };
