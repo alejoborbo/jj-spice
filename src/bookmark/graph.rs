@@ -186,32 +186,35 @@ impl BookmarkGraph {
             head_commits.into_iter().map(|c| (c, None)).collect();
 
         while let Some((commit_id, parent_name)) = stack.pop() {
-            if !visited.insert(commit_id) {
-                continue;
-            }
+            let already_visited = !visited.insert(commit_id);
 
             let maybe_bookmark = bookmarks_per_commit.get(commit_id);
 
             if let Some(bookmark) = maybe_bookmark {
                 let name = bookmark.name().to_string();
 
-                if !nodes.contains_key(&name) {
-                    let mut node = BookmarkNode::new(bookmark.clone());
+                let node = nodes
+                    .entry(name.clone())
+                    .or_insert_with(|| BookmarkNode::new(bookmark.clone()));
 
-                    // Record only the direct parent bookmark.
-                    if let Some(pn) = parent_name {
-                        node.add_ascendant(pn.to_string());
-                    }
-
-                    nodes.insert(name.clone(), node);
+                if let Some(pn) = parent_name
+                    && !node.ascendants.contains(&pn.to_string())
+                {
+                    node.add_ascendant(pn.to_string());
                 }
 
                 let edge_list = edges.entry(name.clone()).or_default();
                 if let Some(pn) = parent_name
                     && pn != name
+                    && !edge_list.iter().any(|e| e.target == pn)
                 {
                     edge_list.push(GraphEdge::direct(pn.to_string()));
                 }
+            }
+
+            // Only traverse children on first visit to avoid infinite loops.
+            if already_visited {
+                continue;
             }
 
             let next_name = maybe_bookmark.map(|b| b.name()).or(parent_name);
@@ -432,6 +435,66 @@ mod tests {
     }
 
     #[test]
+    fn build_bookmark_graph_diamond_records_both_ascendants() {
+        //   A (top)
+        //  / \
+        // B   C  (left, right)
+        //  \ /
+        //   D    (base)
+        let a = commit_id(1);
+        let b = commit_id(2);
+        let c = commit_id(3);
+        let d = commit_id(4);
+
+        let reversed: Vec<GraphNode<CommitId>> = vec![
+            (a.clone(), vec![GraphEdge::direct(b.clone()), GraphEdge::direct(c.clone())]),
+            (b.clone(), vec![GraphEdge::direct(d.clone())]),
+            (c.clone(), vec![GraphEdge::direct(d.clone())]),
+            (d.clone(), vec![]),
+        ];
+
+        let mut bookmarks = HashMap::new();
+        bookmarks.insert(a.clone(), Bookmark::new("top".into()));
+        bookmarks.insert(b.clone(), Bookmark::new("left".into()));
+        bookmarks.insert(c.clone(), Bookmark::new("right".into()));
+        bookmarks.insert(d.clone(), Bookmark::new("base".into()));
+
+        let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+
+        assert_eq!(nodes.len(), 4);
+
+        // base should have both left and right as ascendants
+        let base_ascendants = nodes["base"].ascendants();
+        assert_eq!(base_ascendants.len(), 2, "base should have 2 ascendants, got: {base_ascendants:?}");
+        assert!(base_ascendants.contains(&"left".to_string()));
+        assert!(base_ascendants.contains(&"right".to_string()));
+
+        // base edges should point to both left and right
+        let base_edge_targets: HashSet<&str> = edges["base"]
+            .iter()
+            .map(|e| e.target.as_str())
+            .collect();
+        assert!(base_edge_targets.contains("left"));
+        assert!(base_edge_targets.contains("right"));
+    }
+
+    #[test]
+    fn build_bookmark_graph_single_bookmark() {
+        // One commit with a bookmark, no edges.
+        let a = commit_id(1);
+        let reversed: Vec<GraphNode<CommitId>> = vec![(a.clone(), vec![])];
+
+        let mut bookmarks = HashMap::new();
+        bookmarks.insert(a.clone(), Bookmark::new("only".into()));
+
+        let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes["only"].ascendants().is_empty());
+        assert!(edges["only"].is_empty());
+    }
+
+    #[test]
     fn build_bookmark_graph_no_bookmarks_produces_empty() {
         let a = commit_id(1);
         let reversed: Vec<GraphNode<CommitId>> = vec![(a.clone(), vec![])];
@@ -440,5 +503,110 @@ mod tests {
         let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
         assert!(nodes.is_empty());
         assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn build_bookmark_graph_skips_unbookmarked_commits() {
+        // A -> B -> C -> D, only A and D have bookmarks.
+        // Should produce: head -> base, skipping B and C.
+        let a = commit_id(1);
+        let b = commit_id(2);
+        let c = commit_id(3);
+        let d = commit_id(4);
+
+        let reversed: Vec<GraphNode<CommitId>> = vec![
+            (a.clone(), vec![GraphEdge::direct(b.clone())]),
+            (b.clone(), vec![GraphEdge::direct(c.clone())]),
+            (c.clone(), vec![GraphEdge::direct(d.clone())]),
+            (d.clone(), vec![]),
+        ];
+
+        let mut bookmarks = HashMap::new();
+        bookmarks.insert(a.clone(), Bookmark::new("head".into()));
+        bookmarks.insert(d.clone(), Bookmark::new("base".into()));
+
+        let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes["head"].ascendants().is_empty());
+        assert_eq!(nodes["base"].ascendants(), &["head"]);
+
+        let base_targets: Vec<&str> = edges["base"].iter().map(|e| e.target.as_str()).collect();
+        assert_eq!(base_targets, vec!["head"]);
+        assert!(edges["head"].is_empty());
+    }
+
+    #[test]
+    fn build_bookmark_graph_fork_two_branches() {
+        //   A (root)
+        //  / \
+        // B   C  (left, right) — no shared descendant
+        let a = commit_id(1);
+        let b = commit_id(2);
+        let c = commit_id(3);
+
+        let reversed: Vec<GraphNode<CommitId>> = vec![
+            (a.clone(), vec![GraphEdge::direct(b.clone()), GraphEdge::direct(c.clone())]),
+            (b.clone(), vec![]),
+            (c.clone(), vec![]),
+        ];
+
+        let mut bookmarks = HashMap::new();
+        bookmarks.insert(a.clone(), Bookmark::new("root".into()));
+        bookmarks.insert(b.clone(), Bookmark::new("left".into()));
+        bookmarks.insert(c.clone(), Bookmark::new("right".into()));
+
+        let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+
+        assert_eq!(nodes.len(), 3);
+
+        // Both left and right should have root as their only ascendant.
+        assert_eq!(nodes["left"].ascendants(), &["root"]);
+        assert_eq!(nodes["right"].ascendants(), &["root"]);
+        assert!(nodes["root"].ascendants().is_empty());
+
+        let left_targets: Vec<&str> = edges["left"].iter().map(|e| e.target.as_str()).collect();
+        assert_eq!(left_targets, vec!["root"]);
+
+        let right_targets: Vec<&str> = edges["right"].iter().map(|e| e.target.as_str()).collect();
+        assert_eq!(right_targets, vec!["root"]);
+    }
+
+    #[test]
+    fn build_bookmark_graph_ascendants_not_duplicated() {
+        // A -> B, B -> C, A -> C  (two paths to C from A, through B and direct)
+        // All bookmarked. C should have A as ascendant only once.
+        let a = commit_id(1);
+        let b = commit_id(2);
+        let c = commit_id(3);
+
+        let reversed: Vec<GraphNode<CommitId>> = vec![
+            (a.clone(), vec![GraphEdge::direct(b.clone()), GraphEdge::direct(c.clone())]),
+            (b.clone(), vec![GraphEdge::direct(c.clone())]),
+            (c.clone(), vec![]),
+        ];
+
+        let mut bookmarks = HashMap::new();
+        bookmarks.insert(a.clone(), Bookmark::new("top".into()));
+        bookmarks.insert(b.clone(), Bookmark::new("mid".into()));
+        bookmarks.insert(c.clone(), Bookmark::new("base".into()));
+
+        let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+
+        // base is reachable from top (directly) and from mid.
+        // ascendants should contain both "top" and "mid", each once.
+        let base_ascendants = nodes["base"].ascendants();
+        assert_eq!(base_ascendants.len(), 2, "got: {base_ascendants:?}");
+        assert!(base_ascendants.contains(&"top".to_string()));
+        assert!(base_ascendants.contains(&"mid".to_string()));
+
+        // edges should also have both, no duplicates
+        let base_edge_targets: HashSet<&str> = edges["base"]
+            .iter()
+            .map(|e| e.target.as_str())
+            .collect();
+        assert_eq!(base_edge_targets.len(), 2);
+        assert!(base_edge_targets.contains("top"));
+        assert!(base_edge_targets.contains("mid"));
     }
 }
