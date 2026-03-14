@@ -104,6 +104,19 @@ pub trait Forge: Send + Sync {
         body: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>>;
 
+    /// Update the target (base) branch of an existing change request.
+    ///
+    /// Not all forges support this — the default implementation returns an
+    /// "unsupported" error.
+    fn update_base<'a>(
+        &'a self,
+        meta: &'a ForgeMeta,
+        base_branch: &'a str,
+    ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>> {
+        let _ = (meta, base_branch);
+        Box::pin(async { Err("this forge does not support updating the base branch".into()) })
+    }
+
     /// Close a change request without merging.
     fn close<'a>(
         &'a self,

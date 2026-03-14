@@ -28,22 +28,6 @@ pub async fn run(
         let bookmark = bookmark_node.bookmark();
         let ascendants = bookmark_node.ascendants();
 
-        // Skip bookmarks that already have a tracked CR (unless --force).
-        if state.get(bookmark.name()).is_some() {
-            writeln!(
-                env.ui.warning_default(),
-                "{}: already tracked, skipping",
-                bookmark.name()
-            )?;
-            continue;
-        }
-
-        writeln!(
-            env.ui.stdout_formatter(),
-            "Creating change request for: {}",
-            bookmark.name()
-        )?;
-
         let base_bookmark = match ascendants.len() {
             0 => trunk_name,
             1 => ascendants.first().unwrap().as_str(),
@@ -55,6 +39,36 @@ pub async fn run(
                 ascendants[index].as_str()
             }
         };
+
+        // If the change request already exists, retarget if needed.
+        if let Some(meta) = state.get(bookmark.name()) {
+            match meta.target_branch() {
+                Some(tb) if tb != base_bookmark => {
+                    let cr = forge.update_base(meta, base_bookmark).await?;
+                    state.set(bookmark.name().to_string(), cr.to_forge_meta());
+                    writeln!(
+                        env.ui.stdout_formatter(),
+                        "Base branch has been retargeted to {}, updating change request: {}",
+                        base_bookmark,
+                        cr.id(),
+                    )?;
+                }
+                _ => {
+                    writeln!(
+                        env.ui.warning_default(),
+                        "{}: already tracked, skipping",
+                        bookmark.name(),
+                    )?;
+                }
+            }
+            continue;
+        }
+
+        writeln!(
+            env.ui.stdout_formatter(),
+            "Creating change request for: {}",
+            bookmark.name()
+        )?;
 
         writeln!(
             env.ui.stdout_formatter(),

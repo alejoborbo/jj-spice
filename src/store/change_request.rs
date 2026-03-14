@@ -1,8 +1,18 @@
-use crate::protos::change_request::{ChangeRequests, ForgeMeta};
+use crate::protos::change_request::{ChangeRequests, ForgeMeta, forge_meta::Forge as ForgeOneof};
 
 use super::{SpiceStore, SpiceStoreError};
 
 const FILENAME: &str = "change_requests.pb";
+
+impl ForgeMeta {
+    /// Return the target (base) branch stored in the forge-specific metadata.
+    pub fn target_branch(&self) -> Option<&str> {
+        match &self.forge {
+            Some(ForgeOneof::Github(gh)) => Some(&gh.target_branch),
+            None => None,
+        }
+    }
+}
 
 impl ChangeRequests {
     /// Look up a mapping by bookmark name.

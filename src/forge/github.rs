@@ -295,6 +295,25 @@ impl Forge for GitHubForge {
         })
     }
 
+    fn update_base<'a>(
+        &'a self,
+        meta: &'a ForgeMeta,
+        base_branch: &'a str,
+    ) -> BoxFuture<'a, Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>> {
+        Box::pin(async move {
+            let gh = Self::extract_meta(meta)?;
+            let pr = self
+                .client
+                .pulls(&self.owner, &self.repo)
+                .update(gh.number)
+                .base(base_branch)
+                .send()
+                .await
+                .map_err(GitHubError::Api)?;
+            Ok(Box::new(github_cr_from_pr(&pr)) as Box<dyn ChangeRequest>)
+        })
+    }
+
     fn close<'a>(
         &'a self,
         meta: &'a ForgeMeta,
