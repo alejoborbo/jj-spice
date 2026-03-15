@@ -1,0 +1,19 @@
+# CI-specific Cargo configuration.
+# Copied to .cargo/config.toml during CI runs for faster builds.
+#
+# Disables debug info and incremental compilation, uses mold linker on Linux.
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[target.aarch64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]

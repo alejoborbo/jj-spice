@@ -1,0 +1,191 @@
+name: CI
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.merge_group.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.build }})
+    strategy:
+      fail-fast: ${{ github.event_name == 'merge_group' }}
+      matrix:
+        include:
+          - build: linux-x86_64
+            runner: ubuntu-24.04
+            cargo-flags: ""
+          - build: macos-aarch64
+            runner: macos-15
+            cargo-flags: ""
+          - build: windows-x86_64
+            runner: windows-2022
+            cargo-flags: ""
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install mold linker
+        if: runner.os == 'Linux'
+        uses: rui314/setup-mold@v1
+
+      - name: Use CI Cargo config
+        shell: bash
+        run: cp .cargo/config-ci.toml .cargo/config.toml
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run tests
+        run: cargo nextest run --workspace --all-targets ${{ matrix.cargo-flags }}
+
+      - name: Run doctests
+        run: cargo test --workspace --doc
+
+  check-clippy:
+    name: clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Use CI Cargo config
+        run: cp .cargo/config-ci.toml .cargo/config.toml
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  check-rustfmt:
+    name: rustfmt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly (for rustfmt)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo +nightly fmt --check
+
+  check-cargo-deny:
+    name: cargo-deny (${{ matrix.check }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        check:
+          - advisories
+          - bans
+          - licenses
+          - sources
+    # Advisory check may fail on weekends when new advisories are published
+    # before crate maintainers have time to respond.
+    continue-on-error: ${{ matrix.check == 'advisories' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check ${{ matrix.check }}
+
+  check-protos:
+    name: protos
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install mold linker
+        uses: rui314/setup-mold@v1
+
+      - name: Use CI Cargo config
+        run: cp .cargo/config-ci.toml .cargo/config.toml
+
+      - name: Install protobuf compiler
+        run: sudo apt-get install -y protobuf-compiler
+
+      - name: Regenerate protos
+        run: cargo run -p gen-protos
+
+      - name: Check for uncommitted changes
+        run: |
+          if ! git diff --exit-code; then
+            echo "::error::Generated protobuf code is out of date. Run 'cargo run -p gen-protos' and commit the result."
+            exit 1
+          fi
+
+  required-checks:
+    name: required-checks
+    if: always()
+    needs:
+      - test
+      - check-clippy
+      - check-rustfmt
+      - check-cargo-deny
+      - check-protos
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - name: Aggregate results
+        run: |
+          echo "test: ${{ needs.test.result }}"
+          echo "clippy: ${{ needs.check-clippy.result }}"
+          echo "rustfmt: ${{ needs.check-rustfmt.result }}"
+          echo "cargo-deny: ${{ needs.check-cargo-deny.result }}"
+          echo "protos: ${{ needs.check-protos.result }}"
+          if [[ \
+            "${{ needs.test.result }}" != "success" || \
+            "${{ needs.check-clippy.result }}" != "success" || \
+            "${{ needs.check-rustfmt.result }}" != "success" || \
+            "${{ needs.check-cargo-deny.result }}" != "success" || \
+            "${{ needs.check-protos.result }}" != "success" \
+          ]]; then
+            echo "::error::Some required checks failed."
+            exit 1
+          fi

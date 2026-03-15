@@ -21,6 +21,9 @@ target
 #.idea/
 
 
+# CI generates .cargo/config.toml from .cargo/config-ci.toml
+.cargo/config.toml
+
 # macOS
 .DS_Store
 

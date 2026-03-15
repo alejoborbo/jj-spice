@@ -1,0 +1,100 @@
+version: 2
+project_name: jj-spice
+
+before:
+  hooks:
+    - rustup default stable
+
+builds:
+  - builder: rust
+    binary: jj-spice
+    targets:
+      - x86_64-unknown-linux-gnu
+      - aarch64-unknown-linux-gnu
+      - x86_64-apple-darwin
+      - aarch64-apple-darwin
+      - x86_64-pc-windows-gnu
+    flags:
+      - --release
+
+archives:
+  - format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+
+# Linux packages via nFPM (deb, rpm, apk, archlinux).
+nfpms:
+  - package_name: jj-spice
+    vendor: alejoborbo
+    homepage: https://github.com/alejoborbo/jj-spice
+    maintainer: alejoborbo
+    description: "Stacked change requests for Jujutsu VCS"
+    license: Apache-2.0
+    formats:
+      - deb
+      - rpm
+      - apk
+      - archlinux
+    bindir: /usr/bin
+
+# Homebrew cask pushed to alejoborbo/homebrew-tap.
+homebrew_casks:
+  - name: jj-spice
+    homepage: https://github.com/alejoborbo/jj-spice
+    description: "Stacked change requests for Jujutsu VCS"
+    repository:
+      owner: alejoborbo
+      name: homebrew-tap
+      token: "{{ .Env.GH_PAT }}"
+
+# Scoop manifest pushed to alejoborbo/scoop-bucket.
+scoops:
+  - name: jj-spice
+    homepage: https://github.com/alejoborbo/jj-spice
+    description: "Stacked change requests for Jujutsu VCS"
+    license: Apache-2.0
+    repository:
+      owner: alejoborbo
+      name: scoop-bucket
+      token: "{{ .Env.GH_PAT }}"
+
+# Winget manifest — opens a PR from alejoborbo/winget-pkgs to
+# microsoft/winget-pkgs automatically.
+winget:
+  - name: jj-spice
+    publisher: alejoborbo
+    short_description: "Stacked change requests for Jujutsu VCS"
+    license: Apache-2.0
+    publisher_url: https://github.com/alejoborbo/jj-spice
+    package_identifier: alejoborbo.jj-spice
+    repository:
+      owner: alejoborbo
+      name: winget-pkgs
+      branch: "jj-spice-{{.Version}}"
+      token: "{{ .Env.GH_PAT }}"
+      pull_request:
+        enabled: true
+        base:
+          owner: microsoft
+          name: winget-pkgs
+          branch: master
+
+# Publish to crates.io after all artifacts are built.
+# Dry-run for snapshots, real publish for tags.
+after:
+  hooks:
+    - cmd: cargo publish {{ if .IsSnapshot }}--dry-run{{ end }} --quiet --no-verify
