@@ -88,6 +88,12 @@ impl BookmarkGraph {
         })
     }
 
+    /// Return the edges (child → parent) for a bookmark, or an empty vec if
+    /// the name is not in the graph.
+    pub fn edges_for(&self, name: &str) -> Vec<GraphEdge<String>> {
+        self.edges.get(name).cloned().unwrap_or_default()
+    }
+
     /// Iterate bookmarks in topological order (roots first).
     pub fn iter_graph(&self) -> Result<impl Iterator<Item = &BookmarkNode>, BookmarkGraphError> {
         let result = topo_order_forward(
