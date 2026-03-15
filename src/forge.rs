@@ -42,6 +42,13 @@ pub trait ChangeRequest {
     /// Web URL to view in a browser.
     fn url(&self) -> &str;
 
+    /// Human-readable label for the change request link.
+    ///
+    /// Used as the visible text in hyperlinks and plain-text output.
+    /// Each forge formats this according to its conventions, e.g.
+    /// `"github.com:owner/repo#42"` for GitHub.
+    fn link_label(&self) -> String;
+
     /// Short summary of the change.
     fn title(&self) -> &str;
 

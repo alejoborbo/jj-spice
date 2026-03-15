@@ -4,6 +4,7 @@ use std::process::Command;
 use octocrab::models::pulls::PullRequest;
 use octocrab::models::IssueState;
 use octocrab::Octocrab;
+use url::Url;
 
 use crate::forge::{BoxFuture, ChangeRequest, ChangeStatus, CreateParams, Forge};
 use crate::protos::change_request::forge_meta::Forge as ForgeOneof;
@@ -72,6 +73,7 @@ impl From<octocrab::Error> for GitHubError {
 #[derive(Debug)]
 pub struct GitHubChangeRequest {
     pub(crate) meta: GitHubMeta,
+    pub(crate) host: String,
     pub(crate) title: String,
     pub(crate) body: Option<String>,
     pub(crate) status: ChangeStatus,
@@ -109,6 +111,15 @@ impl ChangeRequest for GitHubChangeRequest {
     fn is_draft(&self) -> bool {
         self.is_draft
     }
+
+    fn link_label(&self) -> String {
+        let repo = if self.meta.target_repo.is_empty() {
+            format!("{}?", self.meta.number)
+        } else {
+            format!("{}#{}", self.meta.target_repo, self.meta.number)
+        };
+        format!("{}:{repo}", self.host)
+    }
 }
 
 /// GitHub / GitHub Enterprise forge backend backed by [`Octocrab`].
@@ -116,29 +127,36 @@ pub struct GitHubForge {
     client: Octocrab,
     owner: String,
     repo: String,
+    /// Hostname used for display in link labels (e.g. `"github.com"`).
+    host: String,
 }
 
 impl GitHubForge {
     /// Create a new GitHub forge client.
     ///
     /// Resolves a personal access token via [`resolve_github_token`] and builds
-    /// an HTTP client internally. Pass `base_uri` to target a GitHub Enterprise
+    /// an HTTP client internally. Pass `base_url` to target a GitHub Enterprise
     /// instance; `None` uses the public GitHub API.
     pub fn new(
         owner: impl Into<String>,
         repo: impl Into<String>,
-        base_uri: Option<&str>,
+        base_url: Option<Url>,
     ) -> Result<Self, GitHubError> {
         let token = resolve_github_token().ok_or(GitHubError::MissingToken)?;
         let mut builder = Octocrab::builder().personal_token(token);
-        if let Some(uri) = base_uri {
-            builder = builder.base_uri(uri)?;
+        if let Some(ref url) = base_url {
+            builder = builder.base_uri(url.as_str())?;
         }
         let client = builder.build()?;
+        let host = base_url
+            .as_ref()
+            .and_then(|u| u.host_str().map(String::from))
+            .unwrap_or_else(|| "github.com".to_string());
         Ok(Self {
             client,
             owner: owner.into(),
             repo: repo.into(),
+            host,
         })
     }
 
@@ -155,6 +173,7 @@ impl GitHubForge {
             client,
             owner: owner.into(),
             repo: repo.into(),
+            host: "github.com".into(),
         }
     }
 
@@ -169,7 +188,7 @@ impl GitHubForge {
 }
 
 /// Build a [`GitHubChangeRequest`] from an octocrab [`PullRequest`] response.
-fn github_cr_from_pr(pr: &PullRequest) -> GitHubChangeRequest {
+fn github_cr_from_pr(pr: &PullRequest, host: &str) -> GitHubChangeRequest {
     let status = match (&pr.state, pr.merged_at.is_some()) {
         (_, true) => ChangeStatus::Merged,
         (Some(IssueState::Closed), false) => ChangeStatus::Closed,
@@ -197,6 +216,7 @@ fn github_cr_from_pr(pr: &PullRequest) -> GitHubChangeRequest {
 
     GitHubChangeRequest {
         meta,
+        host: host.to_string(),
         title: pr.title.clone().unwrap_or_default(),
         body: pr.body.clone(),
         status,
@@ -222,7 +242,7 @@ impl Forge for GitHubForge {
                 .body::<String>(params.body.map(String::from));
 
             let pr = builder.send().await.map_err(GitHubError::Api)?;
-            Ok(Box::new(github_cr_from_pr(&pr)) as Box<dyn ChangeRequest>)
+            Ok(Box::new(github_cr_from_pr(&pr, &self.host)) as Box<dyn ChangeRequest>)
         })
     }
 
@@ -238,7 +258,7 @@ impl Forge for GitHubForge {
                 .get(gh.number)
                 .await
                 .map_err(GitHubError::Api)?;
-            Ok(Box::new(github_cr_from_pr(&pr)) as Box<dyn ChangeRequest>)
+            Ok(Box::new(github_cr_from_pr(&pr, &self.host)) as Box<dyn ChangeRequest>)
         })
     }
 
@@ -267,7 +287,7 @@ impl Forge for GitHubForge {
 
             Ok(all_prs
                 .iter()
-                .map(|pr| Box::new(github_cr_from_pr(pr)) as Box<dyn ChangeRequest>)
+                .map(|pr| Box::new(github_cr_from_pr(pr, &self.host)) as Box<dyn ChangeRequest>)
                 .collect())
         })
     }
@@ -291,7 +311,7 @@ impl Forge for GitHubForge {
             }
 
             let pr = builder.send().await.map_err(GitHubError::Api)?;
-            Ok(Box::new(github_cr_from_pr(&pr)) as Box<dyn ChangeRequest>)
+            Ok(Box::new(github_cr_from_pr(&pr, &self.host)) as Box<dyn ChangeRequest>)
         })
     }
 
@@ -310,7 +330,7 @@ impl Forge for GitHubForge {
                 .send()
                 .await
                 .map_err(GitHubError::Api)?;
-            Ok(Box::new(github_cr_from_pr(&pr)) as Box<dyn ChangeRequest>)
+            Ok(Box::new(github_cr_from_pr(&pr, &self.host)) as Box<dyn ChangeRequest>)
         })
     }
 
@@ -328,7 +348,7 @@ impl Forge for GitHubForge {
                 .send()
                 .await
                 .map_err(GitHubError::Api)?;
-            Ok(Box::new(github_cr_from_pr(&pr)) as Box<dyn ChangeRequest>)
+            Ok(Box::new(github_cr_from_pr(&pr, &self.host)) as Box<dyn ChangeRequest>)
         })
     }
 }
@@ -348,6 +368,7 @@ mod tests {
                 target_repo: "owner/repo".into(),
                 graphql_id: "PR_abc123".into(),
             },
+            host: "github.com".into(),
             title: "Add feature X".into(),
             body: Some("Detailed description".into()),
             status: ChangeStatus::Open,
@@ -746,4 +767,27 @@ mod tests {
         assert!(GitHubError::WrongForge.source().is_none());
         assert!(GitHubError::MissingToken.source().is_none());
     }
+
+    // -- link_label tests --
+
+    #[test]
+    fn link_label_formats_github_dot_com() {
+        let cr = sample_cr();
+        assert_eq!(cr.link_label(), "github.com:owner/repo#42");
+    }
+
+    #[test]
+    fn link_label_formats_ghe_host() {
+        let mut cr = sample_cr();
+        cr.host = "git.corp.example.com".into();
+        assert_eq!(cr.link_label(), "git.corp.example.com:owner/repo#42");
+    }
+
+    #[test]
+    fn link_label_fallback_when_target_repo_empty() {
+        let mut cr = sample_cr();
+        cr.meta.target_repo = String::new();
+        assert_eq!(cr.link_label(), "github.com:42?");
+    }
+
 }

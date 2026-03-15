@@ -5,6 +5,7 @@ use jj_lib::config::StackedConfig;
 use jj_lib::git::{get_git_repo, UnexpectedGitBackendError};
 use jj_lib::store::Store;
 use thiserror::Error;
+use url::Url;
 
 use super::github::GitHubForge;
 use super::Forge;
@@ -19,7 +20,7 @@ enum DetectedForge {
     GitHub {
         owner: String,
         repo: String,
-        base_uri: Option<String>,
+        base_url: Option<Url>,
     },
 }
 
@@ -132,9 +133,9 @@ fn build_forge(
         DetectedForge::GitHub {
             owner,
             repo,
-            base_uri,
+            base_url,
         } => {
-            let forge = GitHubForge::new(&owner, &repo, base_uri.as_deref()).map_err(|e| {
+            let forge = GitHubForge::new(&owner, &repo, base_url).map_err(|e| {
                 ForgeDetectionError::ForgeCreation {
                     remote: remote.to_string(),
                     forge_type: "GitHub",
@@ -160,12 +161,12 @@ pub fn build_forge_for_type(
 ) -> Result<Box<dyn Forge>, ForgeDetectionError> {
     match forge_type {
         "github" => {
-            let base_uri = if hostname == "github.com" {
+            let base_url = if hostname == "github.com" {
                 None
             } else {
-                Some(format!("https://{hostname}/api/v3"))
+                Some(ghe_api_url(hostname))
             };
-            let forge = GitHubForge::new(owner, repo, base_uri.as_deref()).map_err(|e| {
+            let forge = GitHubForge::new(owner, repo, base_url).map_err(|e| {
                 ForgeDetectionError::ForgeCreation {
                     remote: remote.to_string(),
                     forge_type: "GitHub",
@@ -191,14 +192,14 @@ fn detect_forge_from_host(
     let path_str = std::str::from_utf8(path.as_ref()).ok()?;
 
     // Check if this host is a known GitHub instance.
-    let (is_github, base_uri) = if host == "github.com" {
+    let (is_github, base_url) = if host == "github.com" {
         (true, None)
     } else {
         // Check jj config for GHE: spice.forges.<hostname>.type = "github"
         let key: &[&str] = &["spice", "forges", host, "type"];
         match config.get::<String>(key) {
             Ok(ref forge_type) if forge_type == "github" => {
-                (true, Some(format!("https://{host}/api/v3")))
+                (true, Some(ghe_api_url(host)))
             }
             _ => (false, None),
         }
@@ -209,11 +210,17 @@ fn detect_forge_from_host(
         return Some(DetectedForge::GitHub {
             owner,
             repo,
-            base_uri,
+            base_url,
         });
     }
 
     None
+}
+
+/// Build the GitHub Enterprise API base URL for a given hostname.
+fn ghe_api_url(hostname: &str) -> Url {
+    Url::parse(&format!("https://{hostname}/api/v3"))
+        .expect("hostname should form a valid URL")
 }
 
 /// Extract `(owner, repo)` from a URL path component.
@@ -300,7 +307,7 @@ mod tests {
             Some(DetectedForge::GitHub {
                 owner: "acme".into(),
                 repo: "widget".into(),
-                base_uri: None,
+                base_url: None,
             })
         );
     }
