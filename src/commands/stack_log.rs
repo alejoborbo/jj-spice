@@ -214,7 +214,9 @@ fn render_graph(
             let mut edges = graph.edges_for(name);
 
             // Root bookmarks (no edges to parents) get an edge to trunk.
-            if edges.is_empty() && let Some(trunk) = trunk_name {
+            if edges.is_empty()
+                && let Some(trunk) = trunk_name
+            {
                 edges.push(GraphEdge::direct(trunk.to_string()));
             }
 

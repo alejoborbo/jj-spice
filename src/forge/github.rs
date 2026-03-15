@@ -228,10 +228,7 @@ fn github_cr_from_pr(pr: &PullRequest, host: &str) -> GitHubChangeRequest {
 }
 
 impl Forge for GitHubForge {
-    fn create<'a>(
-        &'a self,
-        params: CreateParams<'a>,
-    ) -> BoxFuture<'a, ForgeResult> {
+    fn create<'a>(&'a self, params: CreateParams<'a>) -> BoxFuture<'a, ForgeResult> {
         Box::pin(async move {
             let pulls = self.client.pulls(&self.owner, &self.repo);
             let builder = pulls
@@ -244,10 +241,7 @@ impl Forge for GitHubForge {
         })
     }
 
-    fn get<'a>(
-        &'a self,
-        meta: &'a ForgeMeta,
-    ) -> BoxFuture<'a, ForgeResult> {
+    fn get<'a>(&'a self, meta: &'a ForgeMeta) -> BoxFuture<'a, ForgeResult> {
         Box::pin(async move {
             let gh = Self::extract_meta(meta)?;
             let pr = self
@@ -336,10 +330,7 @@ impl Forge for GitHubForge {
         })
     }
 
-    fn close<'a>(
-        &'a self,
-        meta: &'a ForgeMeta,
-    ) -> BoxFuture<'a, ForgeResult> {
+    fn close<'a>(&'a self, meta: &'a ForgeMeta) -> BoxFuture<'a, ForgeResult> {
         Box::pin(async move {
             let gh = Self::extract_meta(meta)?;
             let pr = self
@@ -801,5 +792,4 @@ mod tests {
         cr.meta.target_repo = String::new();
         assert_eq!(cr.link_label(), "github.com:42?");
     }
-
 }

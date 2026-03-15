@@ -2,13 +2,13 @@ use std::collections::HashMap;
 
 use gix::remote::Direction;
 use jj_lib::config::StackedConfig;
-use jj_lib::git::{get_git_repo, UnexpectedGitBackendError};
+use jj_lib::git::{UnexpectedGitBackendError, get_git_repo};
 use jj_lib::store::Store;
 use thiserror::Error;
 use url::Url;
 
-use super::github::GitHubForge;
 use super::Forge;
+use super::github::GitHubForge;
 
 /// Supported forge type identifiers for interactive selection and config
 /// persistence.
@@ -198,9 +198,7 @@ fn detect_forge_from_host(
         // Check jj config for GHE: spice.forges.<hostname>.type = "github"
         let key: &[&str] = &["spice", "forges", host, "type"];
         match config.get::<String>(key) {
-            Ok(ref forge_type) if forge_type == "github" => {
-                (true, Some(ghe_api_url(host)))
-            }
+            Ok(ref forge_type) if forge_type == "github" => (true, Some(ghe_api_url(host))),
             _ => (false, None),
         }
     };
@@ -219,8 +217,7 @@ fn detect_forge_from_host(
 
 /// Build the GitHub Enterprise API base URL for a given hostname.
 fn ghe_api_url(hostname: &str) -> Url {
-    Url::parse(&format!("https://{hostname}/api/v3"))
-        .expect("hostname should form a valid URL")
+    Url::parse(&format!("https://{hostname}/api/v3")).expect("hostname should form a valid URL")
 }
 
 /// Extract `(owner, repo)` from a URL path component.
@@ -382,8 +379,13 @@ mod tests {
 
     #[tokio::test]
     async fn build_forge_for_type_github_enterprise() {
-        let result =
-            build_forge_for_type("upstream", "github", "acme", "widget", "git.corp.example.com");
+        let result = build_forge_for_type(
+            "upstream",
+            "github",
+            "acme",
+            "widget",
+            "git.corp.example.com",
+        );
         assert!(result.is_ok());
     }
 
@@ -398,5 +400,4 @@ mod tests {
             "unexpected error: {err}"
         );
     }
-
 }

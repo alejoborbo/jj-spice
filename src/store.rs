@@ -70,7 +70,7 @@ impl SpiceStore {
 mod tests {
     use super::*;
     use crate::protos::change_request::{
-        forge_meta::Forge as ForgeOneof, ChangeRequests, ForgeMeta, GitHubMeta,
+        ChangeRequests, ForgeMeta, GitHubMeta, forge_meta::Forge as ForgeOneof,
     };
     use tempfile::TempDir;
 

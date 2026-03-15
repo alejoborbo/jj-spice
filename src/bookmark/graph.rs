@@ -116,7 +116,6 @@ impl BookmarkGraph {
         Ok(result.into_iter())
     }
 
-
     fn find_root_commit(
         repo: &dyn Repo,
         trunk: &CommitId,
@@ -310,10 +309,7 @@ mod tests {
         // A -> [], B -> [] — both are heads
         let a = commit_id(1);
         let b = commit_id(2);
-        let reversed: Vec<GraphNode<CommitId>> = vec![
-            (a.clone(), vec![]),
-            (b.clone(), vec![]),
-        ];
+        let reversed: Vec<GraphNode<CommitId>> = vec![(a.clone(), vec![]), (b.clone(), vec![])];
 
         let heads = BookmarkGraph::find_head_commits(&reversed);
         assert_eq!(heads.len(), 2);
@@ -336,7 +332,10 @@ mod tests {
     fn find_head_bookmarks_linear() {
         // "feat" -> "base", head is "feat"
         let mut edges = HashMap::new();
-        edges.insert("feat".to_string(), vec![GraphEdge::direct("base".to_string())]);
+        edges.insert(
+            "feat".to_string(),
+            vec![GraphEdge::direct("base".to_string())],
+        );
         edges.insert("base".to_string(), vec![]);
 
         let heads = BookmarkGraph::find_head_bookmarks(&edges);
@@ -365,8 +364,14 @@ mod tests {
                 GraphEdge::direct("right".to_string()),
             ],
         );
-        edges.insert("left".to_string(), vec![GraphEdge::direct("base".to_string())]);
-        edges.insert("right".to_string(), vec![GraphEdge::direct("base".to_string())]);
+        edges.insert(
+            "left".to_string(),
+            vec![GraphEdge::direct("base".to_string())],
+        );
+        edges.insert(
+            "right".to_string(),
+            vec![GraphEdge::direct("base".to_string())],
+        );
         edges.insert("base".to_string(), vec![]);
 
         let heads = BookmarkGraph::find_head_bookmarks(&edges);
@@ -405,10 +410,7 @@ mod tests {
         assert!(edges["feat-a"].is_empty() || edges["feat-a"].iter().all(|e| e.target != "feat-a"));
 
         // feat-c should have an edge to feat-a
-        let feat_c_targets: Vec<&str> = edges["feat-c"]
-            .iter()
-            .map(|e| e.target.as_str())
-            .collect();
+        let feat_c_targets: Vec<&str> = edges["feat-c"].iter().map(|e| e.target.as_str()).collect();
         assert!(feat_c_targets.contains(&"feat-a"));
     }
 
@@ -457,7 +459,10 @@ mod tests {
         let d = commit_id(4);
 
         let reversed: Vec<GraphNode<CommitId>> = vec![
-            (a.clone(), vec![GraphEdge::direct(b.clone()), GraphEdge::direct(c.clone())]),
+            (
+                a.clone(),
+                vec![GraphEdge::direct(b.clone()), GraphEdge::direct(c.clone())],
+            ),
             (b.clone(), vec![GraphEdge::direct(d.clone())]),
             (c.clone(), vec![GraphEdge::direct(d.clone())]),
             (d.clone(), vec![]),
@@ -475,15 +480,17 @@ mod tests {
 
         // base should have both left and right as ascendants
         let base_ascendants = nodes["base"].ascendants();
-        assert_eq!(base_ascendants.len(), 2, "base should have 2 ascendants, got: {base_ascendants:?}");
+        assert_eq!(
+            base_ascendants.len(),
+            2,
+            "base should have 2 ascendants, got: {base_ascendants:?}"
+        );
         assert!(base_ascendants.contains(&"left".to_string()));
         assert!(base_ascendants.contains(&"right".to_string()));
 
         // base edges should point to both left and right
-        let base_edge_targets: HashSet<&str> = edges["base"]
-            .iter()
-            .map(|e| e.target.as_str())
-            .collect();
+        let base_edge_targets: HashSet<&str> =
+            edges["base"].iter().map(|e| e.target.as_str()).collect();
         assert!(base_edge_targets.contains("left"));
         assert!(base_edge_targets.contains("right"));
     }
@@ -556,7 +563,10 @@ mod tests {
         let c = commit_id(3);
 
         let reversed: Vec<GraphNode<CommitId>> = vec![
-            (a.clone(), vec![GraphEdge::direct(b.clone()), GraphEdge::direct(c.clone())]),
+            (
+                a.clone(),
+                vec![GraphEdge::direct(b.clone()), GraphEdge::direct(c.clone())],
+            ),
             (b.clone(), vec![]),
             (c.clone(), vec![]),
         ];
@@ -591,7 +601,10 @@ mod tests {
         let c = commit_id(3);
 
         let reversed: Vec<GraphNode<CommitId>> = vec![
-            (a.clone(), vec![GraphEdge::direct(b.clone()), GraphEdge::direct(c.clone())]),
+            (
+                a.clone(),
+                vec![GraphEdge::direct(b.clone()), GraphEdge::direct(c.clone())],
+            ),
             (b.clone(), vec![GraphEdge::direct(c.clone())]),
             (c.clone(), vec![]),
         ];
@@ -611,10 +624,8 @@ mod tests {
         assert!(base_ascendants.contains(&"mid".to_string()));
 
         // edges should also have both, no duplicates
-        let base_edge_targets: HashSet<&str> = edges["base"]
-            .iter()
-            .map(|e| e.target.as_str())
-            .collect();
+        let base_edge_targets: HashSet<&str> =
+            edges["base"].iter().map(|e| e.target.as_str()).collect();
         assert_eq!(base_edge_targets.len(), 2);
         assert!(base_edge_targets.contains("top"));
         assert!(base_edge_targets.contains("mid"));

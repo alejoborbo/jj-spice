@@ -88,16 +88,10 @@ pub struct CreateParams<'a> {
 /// use `Box::pin(async move { ... })` to build the future.
 pub trait Forge: Send + Sync {
     /// Create a new change request on the forge.
-    fn create<'a>(
-        &'a self,
-        params: CreateParams<'a>,
-    ) -> BoxFuture<'a, ForgeResult>;
+    fn create<'a>(&'a self, params: CreateParams<'a>) -> BoxFuture<'a, ForgeResult>;
 
     /// Fetch a change request by its stored metadata.
-    fn get<'a>(
-        &'a self,
-        meta: &'a ForgeMeta,
-    ) -> BoxFuture<'a, ForgeResult>;
+    fn get<'a>(&'a self, meta: &'a ForgeMeta) -> BoxFuture<'a, ForgeResult>;
 
     /// Find change requests by source and/or target branch.
     ///
@@ -131,10 +125,7 @@ pub trait Forge: Send + Sync {
     }
 
     /// Close a change request without merging.
-    fn close<'a>(
-        &'a self,
-        meta: &'a ForgeMeta,
-    ) -> BoxFuture<'a, ForgeResult>;
+    fn close<'a>(&'a self, meta: &'a ForgeMeta) -> BoxFuture<'a, ForgeResult>;
 
     /// Find change requests matching `source_branch` and return persistable metadata.
     ///

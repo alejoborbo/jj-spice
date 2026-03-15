@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use jj_cli::cli_util::{find_workspace_dir, GlobalArgs, RevisionArg};
+use jj_cli::cli_util::{GlobalArgs, RevisionArg, find_workspace_dir};
 use jj_cli::command_error::print_parse_diagnostics;
 use jj_cli::config::{
-    config_from_environment, default_config_layers, parse_config_args, ConfigArgKind, ConfigEnv,
+    ConfigArgKind, ConfigEnv, config_from_environment, default_config_layers, parse_config_args,
 };
-use jj_cli::revset_util::{load_revset_aliases, RevsetExpressionEvaluator};
+use jj_cli::revset_util::{RevsetExpressionEvaluator, load_revset_aliases};
 use jj_cli::ui::Ui;
 use jj_lib::backend::CommitId;
 use jj_lib::config::{ConfigLayer, ConfigSource};
@@ -18,7 +18,7 @@ use jj_lib::revset::{
     RevsetWorkspaceContext,
 };
 use jj_lib::settings::UserSettings;
-use jj_lib::workspace::{default_working_copy_factories, Workspace};
+use jj_lib::workspace::{Workspace, default_working_copy_factories};
 
 use crate::store::SpiceStore;
 

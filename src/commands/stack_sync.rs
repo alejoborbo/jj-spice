@@ -11,7 +11,7 @@ use crate::bookmark::graph::{BookmarkGraph, BookmarkNode};
 use crate::commands::env::{SpiceEnv, cmd_err};
 use crate::forge::Forge;
 use crate::forge::detect::{
-    DetectionResult, UnmatchedRemote, FORGE_TYPES, build_forge_for_type, detect_forges,
+    DetectionResult, FORGE_TYPES, UnmatchedRemote, build_forge_for_type, detect_forges,
 };
 use crate::protos::change_request::ForgeMeta;
 use crate::store::SpiceStore;
@@ -124,7 +124,10 @@ fn resolve_unmatched_remotes(
             remote_names.join(", "),
         );
 
-        let selected = match env.ui.prompt_choice(&prompt_msg, &choices, Some(skip_index)) {
+        let selected = match env
+            .ui
+            .prompt_choice(&prompt_msg, &choices, Some(skip_index))
+        {
             Ok(idx) => idx,
             Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
                 // Non-interactive terminal — skip gracefully.
@@ -188,10 +191,7 @@ fn persist_forge_config(
     };
 
     let mut config_file = ConfigFile::load_or_empty(ConfigSource::Repo, config_path)?;
-    config_file.set_value(
-        &["spice", "forges", hostname, "type"][..],
-        forge_type,
-    )?;
+    config_file.set_value(&["spice", "forges", hostname, "type"][..], forge_type)?;
     config_file.save()?;
 
     writeln!(
