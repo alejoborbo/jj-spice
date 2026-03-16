@@ -73,6 +73,21 @@ scoops:
       name: scoop-bucket
       token: "{{ .Env.GH_PAT }}"
 
+# Chocolatey package pushed to alejoborbo/chocolatey-bucket.
+chocolateys:
+  - name: jj-spice
+    title: jj-spice
+    owners: alejoborbo
+    authors: alejoborbo
+    project_url: https://github.com/alejoborbo/jj-spice
+    license_url: https://github.com/alejoborbo/jj-spice/blob/main/LICENSE
+    project_source_url: https://github.com/alejoborbo/jj-spice
+    bug_tracker_url: https://github.com/alejoborbo/jj-spice/issues
+    description: "Stacked change requests for Jujutsu VCS"
+    summary: "Forge integration for jj (Jujutsu). Manage stacked change requests from the command line."
+    tags: "jujutsu jj vcs git stacked-prs"
+    api_key: "{{ .Env.CHOCOLATEY_API_KEY }}"
+
 # Winget manifest — opens a PR from alejoborbo/winget-pkgs to
 # microsoft/winget-pkgs automatically.
 winget:
