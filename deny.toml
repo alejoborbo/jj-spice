@@ -24,7 +24,6 @@ allow = [
     "CC0-1.0",
     "BSL-1.0",
 ]
-copyleft = "deny"
 
 [bans]
 # Prevent duplicate versions of the same crate where possible.
