@@ -1,8 +1,4 @@
-mod bookmark;
 mod commands;
-mod forge;
-mod protos;
-mod store;
 
 use clap::{CommandFactory, Parser};
 

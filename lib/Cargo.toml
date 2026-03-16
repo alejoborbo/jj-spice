@@ -1,0 +1,21 @@
+[package]
+name = "jj-spice-lib"
+description = "Core library for jj-spice — stacked change requests for Jujutsu VCS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gix = { workspace = true }
+itertools = { workspace = true }
+jj-lib = { workspace = true }
+octocrab = { workspace = true }
+prost = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tokio = { workspace = true }
+wiremock = { workspace = true }

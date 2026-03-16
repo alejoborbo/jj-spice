@@ -7,6 +7,7 @@ before:
 
 builds:
   - builder: rust
+    dir: cli
     binary: jj-spice
     targets:
       - x86_64-unknown-linux-gnu
@@ -95,6 +96,8 @@ winget:
 
 # Publish to crates.io after all artifacts are built.
 # Dry-run for snapshots, real publish for tags.
+# Publish lib first (cli depends on it).
 after:
   hooks:
-    - cmd: cargo publish {{ if .IsSnapshot }}--dry-run{{ end }} --quiet --no-verify
+    - cmd: cargo publish -p jj-spice-lib {{ if .IsSnapshot }}--dry-run{{ end }} --quiet --no-verify
+    - cmd: cargo publish -p jj-spice-cli {{ if .IsSnapshot }}--dry-run{{ end }} --quiet --no-verify

@@ -6,16 +6,16 @@ use jj_lib::backend::CommitId;
 use jj_lib::config::{ConfigFile, ConfigSource};
 use jj_lib::repo::Repo;
 
-use crate::bookmark::Bookmark;
-use crate::bookmark::graph::{BookmarkGraph, BookmarkNode};
+use jj_spice_lib::bookmark::Bookmark;
+use jj_spice_lib::bookmark::graph::{BookmarkGraph, BookmarkNode};
 use crate::commands::env::{SpiceEnv, cmd_err};
-use crate::forge::Forge;
-use crate::forge::detect::{
+use jj_spice_lib::forge::Forge;
+use jj_spice_lib::forge::detect::{
     DetectionResult, FORGE_TYPES, UnmatchedRemote, build_forge_for_type, detect_forges,
 };
-use crate::protos::change_request::ForgeMeta;
-use crate::store::SpiceStore;
-use crate::store::change_request::ChangeRequestStore;
+use jj_spice_lib::protos::change_request::ForgeMeta;
+use jj_spice_lib::store::SpiceStore;
+use jj_spice_lib::store::change_request::ChangeRequestStore;
 
 /// Per-bookmark error (non-fatal, printed as a warning).
 #[derive(Debug, thiserror::Error)]
@@ -264,7 +264,7 @@ async fn sync_bookmark(
 
 #[cfg(test)]
 mod tests {
-    use crate::protos::change_request::{ForgeMeta, GitHubMeta, forge_meta::Forge as ForgeOneof};
+    use jj_spice_lib::protos::change_request::{ForgeMeta, GitHubMeta, forge_meta::Forge as ForgeOneof};
 
     #[test]
     fn forge_meta_display_github_variant() {

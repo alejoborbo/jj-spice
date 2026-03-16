@@ -74,13 +74,13 @@ impl From<octocrab::Error> for GitHubError {
 /// A GitHub Pull Request — combines stored identity with live API data.
 #[derive(Debug)]
 pub struct GitHubChangeRequest {
-    pub(crate) meta: GitHubMeta,
-    pub(crate) host: String,
-    pub(crate) title: String,
-    pub(crate) body: Option<String>,
-    pub(crate) status: ChangeStatus,
-    pub(crate) is_draft: bool,
-    pub(crate) url: String,
+    pub meta: GitHubMeta,
+    pub host: String,
+    pub title: String,
+    pub body: Option<String>,
+    pub status: ChangeStatus,
+    pub is_draft: bool,
+    pub url: String,
 }
 
 impl ChangeRequest for GitHubChangeRequest {

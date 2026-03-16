@@ -2526,7 +2526,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "jj-spice"
+name = "jj-spice-cli"
 version = "0.1.0"
 dependencies = [
  "chrono",
@@ -2534,16 +2534,28 @@ dependencies = [
  "clap_complete",
  "clap_complete_nushell",
  "dunce",
+ "jj-cli",
+ "jj-lib",
+ "jj-spice-lib",
+ "ratatui",
+ "serde_json",
+ "termion",
+ "thiserror 2.0.18",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
+name = "jj-spice-lib"
+version = "0.1.0"
+dependencies = [
  "gix",
  "itertools",
- "jj-cli",
  "jj-lib",
  "octocrab",
  "prost",
- "ratatui",
  "serde_json",
  "tempfile",
- "termion",
  "thiserror 2.0.18",
  "tokio",
  "url",

@@ -1,4 +1,3 @@
-use gix::remote;
 use jj_lib::op_store::LocalRemoteRefTarget;
 
 /// DAG of bookmarks between trunk and head for stack operations.
@@ -61,6 +60,11 @@ impl<'a> Bookmark<'a> {
     /// The local bookmark name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The local and remote ref targets for this bookmark.
+    pub fn ref_target(&self) -> &LocalRemoteRefTarget<'a> {
+        &self.ref_target
     }
 
     /// Remote tracking refs for this bookmark (excluding the synthetic `"git"` remote).

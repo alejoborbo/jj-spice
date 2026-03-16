@@ -8,14 +8,14 @@ use jj_lib::config::{ConfigLayer, ConfigSource};
 use jj_lib::graph::GraphEdge;
 use jj_lib::repo::Repo;
 
-use crate::bookmark::graph::{BookmarkGraph, BookmarkNode};
+use jj_spice_lib::bookmark::graph::{BookmarkGraph, BookmarkNode};
 use crate::commands::env::SpiceEnv;
-use crate::forge::detect::{DetectionResult, detect_forges};
-use crate::forge::{ChangeRequest, ChangeStatus, Forge};
-use crate::protos::change_request::ForgeMeta;
-use crate::protos::change_request::forge_meta::Forge as ForgeOneof;
-use crate::store::SpiceStore;
-use crate::store::change_request::ChangeRequestStore;
+use jj_spice_lib::forge::detect::{DetectionResult, detect_forges};
+use jj_spice_lib::forge::{ChangeRequest, ChangeStatus, Forge};
+use jj_spice_lib::protos::change_request::ForgeMeta;
+use jj_spice_lib::protos::change_request::forge_meta::Forge as ForgeOneof;
+use jj_spice_lib::store::SpiceStore;
+use jj_spice_lib::store::change_request::ChangeRequestStore;
 
 /// Default color rules for `stack log` output.
 ///
@@ -106,7 +106,7 @@ fn resolve_trunk_bookmark_name(env: &SpiceEnv, trunk_id: &CommitId) -> Option<St
 }
 
 /// Load the change request store, returning an empty state on failure.
-fn load_change_requests(env: &SpiceEnv) -> crate::protos::change_request::ChangeRequests {
+fn load_change_requests(env: &SpiceEnv) -> jj_spice_lib::protos::change_request::ChangeRequests {
     SpiceStore::init_at(env.workspace.repo_path())
         .ok()
         .and_then(|store| ChangeRequestStore::new(&store).load().ok())
@@ -126,7 +126,7 @@ fn detect_forge_map(env: &SpiceEnv) -> HashMap<String, Box<dyn Forge>> {
 /// are captured per-bookmark rather than failing the entire command.
 async fn fetch_live_crs(
     nodes: &[&BookmarkNode<'_>],
-    cr_state: &crate::protos::change_request::ChangeRequests,
+    cr_state: &jj_spice_lib::protos::change_request::ChangeRequests,
     forge_map: &HashMap<String, Box<dyn Forge>>,
 ) -> HashMap<String, Result<Box<dyn ChangeRequest>, String>> {
     let mut results = HashMap::new();
@@ -186,7 +186,7 @@ fn render_graph(
     nodes: &[&BookmarkNode<'_>],
     graph: &BookmarkGraph,
     trunk_name: Option<&str>,
-    cr_state: &crate::protos::change_request::ChangeRequests,
+    cr_state: &jj_spice_lib::protos::change_request::ChangeRequests,
     live_crs: &HashMap<String, Result<Box<dyn ChangeRequest>, String>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Build a formatter factory that includes spice color defaults.
@@ -274,7 +274,7 @@ fn inject_color_defaults(
 fn render_node_text(
     fmt: &mut dyn Formatter,
     node: &BookmarkNode,
-    cr_state: &crate::protos::change_request::ChangeRequests,
+    cr_state: &jj_spice_lib::protos::change_request::ChangeRequests,
     live_crs: &HashMap<String, Result<Box<dyn ChangeRequest>, String>>,
 ) -> std::io::Result<()> {
     let name = node.name();
@@ -430,12 +430,12 @@ fn format_meta_id(meta: &ForgeMeta) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forge::github::GitHubChangeRequest;
-    use crate::protos::change_request::{ChangeRequests, GitHubMeta};
+    use jj_spice_lib::forge::github::GitHubChangeRequest;
+    use jj_spice_lib::protos::change_request::{ChangeRequests, GitHubMeta};
     use jj_lib::op_store::{LocalRemoteRefTarget, RefTarget};
 
     fn make_node(name: &str) -> BookmarkNode<'static> {
-        BookmarkNode::new(crate::bookmark::Bookmark::new(
+        BookmarkNode::new(jj_spice_lib::bookmark::Bookmark::new(
             name.into(),
             LocalRemoteRefTarget {
                 local_target: RefTarget::absent_ref(),

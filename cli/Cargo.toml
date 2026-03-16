@@ -1,0 +1,30 @@
+[package]
+name = "jj-spice-cli"
+description = "CLI for jj-spice — stacked change requests for Jujutsu VCS"
+default-run = "jj-spice"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "jj-spice"
+path = "src/main.rs"
+
+[dependencies]
+jj-spice-lib = { workspace = true }
+
+chrono = { workspace = true }
+clap = { workspace = true }
+clap_complete = { workspace = true }
+clap_complete_nushell = { workspace = true }
+dunce = { workspace = true }
+jj-cli = { workspace = true }
+jj-lib = { workspace = true }
+ratatui = { workspace = true }
+termion = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+wiremock = { workspace = true }

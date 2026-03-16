@@ -36,7 +36,7 @@ impl SpiceStore {
     /// Open or create the spice store directory at a given repo path.
     ///
     /// Creates `.jj/repo/spice/` under the given path.
-    pub(crate) fn init_at(repo_path: &std::path::Path) -> Result<Self, SpiceStoreError> {
+    pub fn init_at(repo_path: &std::path::Path) -> Result<Self, SpiceStoreError> {
         let dir = repo_path.join("spice");
         fs::create_dir_all(&dir)?;
         Ok(Self { dir })
@@ -70,7 +70,7 @@ impl SpiceStore {
 mod tests {
     use super::*;
     use crate::protos::change_request::{
-        ChangeRequests, ForgeMeta, GitHubMeta, forge_meta::Forge as ForgeOneof,
+        forge_meta::Forge as ForgeOneof, ChangeRequests, ForgeMeta, GitHubMeta,
     };
     use tempfile::TempDir;
 

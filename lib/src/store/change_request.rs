@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::protos::change_request::{ChangeRequests, ForgeMeta, forge_meta::Forge as ForgeOneof};
+use crate::protos::change_request::{forge_meta::Forge as ForgeOneof, ChangeRequests, ForgeMeta};
 
 use super::{SpiceStore, SpiceStoreError};
 
@@ -20,7 +20,11 @@ impl fmt::Display for ForgeMeta {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.forge {
             Some(ForgeOneof::Github(gh)) => {
-                write!(f, "GitHub PR #{} ({} → {})", gh.number, gh.source_branch, gh.target_branch)
+                write!(
+                    f,
+                    "GitHub PR #{} ({} → {})",
+                    gh.number, gh.source_branch, gh.target_branch
+                )
             }
             None => write!(f, "unknown forge"),
         }
@@ -74,7 +78,7 @@ impl<'a> ChangeRequestStore<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protos::change_request::{GitHubMeta, forge_meta::Forge as ForgeOneof};
+    use crate::protos::change_request::{forge_meta::Forge as ForgeOneof, GitHubMeta};
     use tempfile::TempDir;
 
     /// Build a sample [`ForgeMeta`] for testing.

@@ -3,12 +3,12 @@ use std::io::Write as _;
 use jj_cli::description_util::TextEditor;
 use jj_lib::backend::CommitId;
 
-use crate::bookmark::graph::BookmarkGraph;
+use jj_spice_lib::bookmark::graph::BookmarkGraph;
 use crate::commands::env::SpiceEnv;
-use crate::forge::{CreateParams, Forge};
-use crate::protos::change_request::{ChangeRequests, ForgeMeta};
-use crate::store::SpiceStore;
-use crate::store::change_request::ChangeRequestStore;
+use jj_spice_lib::forge::{CreateParams, Forge};
+use jj_spice_lib::protos::change_request::{ChangeRequests, ForgeMeta};
+use jj_spice_lib::store::SpiceStore;
+use jj_spice_lib::store::change_request::ChangeRequestStore;
 
 /// Create change requests for each bookmark in the current stack (trunk..@).
 pub async fn run(
