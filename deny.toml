@@ -20,7 +20,6 @@ allow = [
     "Unicode-DFS-2016",
     "Zlib",
     "MPL-2.0",
-    "OpenSSL",
     "CC0-1.0",
     "BSL-1.0",
     "WTFPL",
