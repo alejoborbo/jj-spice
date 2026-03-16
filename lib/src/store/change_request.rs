@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::protos::change_request::{forge_meta::Forge as ForgeOneof, ChangeRequests, ForgeMeta};
+use crate::protos::change_request::{ChangeRequests, ForgeMeta, forge_meta::Forge as ForgeOneof};
 
 use super::{SpiceStore, SpiceStoreError};
 
@@ -78,7 +78,7 @@ impl<'a> ChangeRequestStore<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protos::change_request::{forge_meta::Forge as ForgeOneof, GitHubMeta};
+    use crate::protos::change_request::{GitHubMeta, forge_meta::Forge as ForgeOneof};
     use tempfile::TempDir;
 
     /// Build a sample [`ForgeMeta`] for testing.

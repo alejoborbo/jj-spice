@@ -6,9 +6,9 @@ use jj_lib::backend::CommitId;
 use jj_lib::config::{ConfigFile, ConfigSource};
 use jj_lib::repo::Repo;
 
+use crate::commands::env::{SpiceEnv, cmd_err};
 use jj_spice_lib::bookmark::Bookmark;
 use jj_spice_lib::bookmark::graph::{BookmarkGraph, BookmarkNode};
-use crate::commands::env::{SpiceEnv, cmd_err};
 use jj_spice_lib::forge::Forge;
 use jj_spice_lib::forge::detect::{
     DetectionResult, FORGE_TYPES, UnmatchedRemote, build_forge_for_type, detect_forges,
@@ -264,7 +264,9 @@ async fn sync_bookmark(
 
 #[cfg(test)]
 mod tests {
-    use jj_spice_lib::protos::change_request::{ForgeMeta, GitHubMeta, forge_meta::Forge as ForgeOneof};
+    use jj_spice_lib::protos::change_request::{
+        ForgeMeta, GitHubMeta, forge_meta::Forge as ForgeOneof,
+    };
 
     #[test]
     fn forge_meta_display_github_variant() {

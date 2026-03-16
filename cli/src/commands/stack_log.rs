@@ -8,8 +8,8 @@ use jj_lib::config::{ConfigLayer, ConfigSource};
 use jj_lib::graph::GraphEdge;
 use jj_lib::repo::Repo;
 
-use jj_spice_lib::bookmark::graph::{BookmarkGraph, BookmarkNode};
 use crate::commands::env::SpiceEnv;
+use jj_spice_lib::bookmark::graph::{BookmarkGraph, BookmarkNode};
 use jj_spice_lib::forge::detect::{DetectionResult, detect_forges};
 use jj_spice_lib::forge::{ChangeRequest, ChangeStatus, Forge};
 use jj_spice_lib::protos::change_request::ForgeMeta;
@@ -430,9 +430,9 @@ fn format_meta_id(meta: &ForgeMeta) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jj_lib::op_store::{LocalRemoteRefTarget, RefTarget};
     use jj_spice_lib::forge::github::GitHubChangeRequest;
     use jj_spice_lib::protos::change_request::{ChangeRequests, GitHubMeta};
-    use jj_lib::op_store::{LocalRemoteRefTarget, RefTarget};
 
     fn make_node(name: &str) -> BookmarkNode<'static> {
         BookmarkNode::new(jj_spice_lib::bookmark::Bookmark::new(

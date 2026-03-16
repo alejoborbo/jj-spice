@@ -14,9 +14,9 @@ pub mod stack_sync;
 use jj_cli::cli_util::RevisionArg;
 use jj_lib::repo::Repo as _;
 
-use jj_spice_lib::forge::detect::detect_forges;
 use cli::{Cli, SpiceCommand, StackCommand, UtilCommand};
 use env::SpiceEnv;
+use jj_spice_lib::forge::detect::detect_forges;
 
 /// Dispatch to the appropriate command.
 ///

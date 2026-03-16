@@ -3,8 +3,8 @@ use std::io::Write as _;
 use jj_cli::description_util::TextEditor;
 use jj_lib::backend::CommitId;
 
-use jj_spice_lib::bookmark::graph::BookmarkGraph;
 use crate::commands::env::SpiceEnv;
+use jj_spice_lib::bookmark::graph::BookmarkGraph;
 use jj_spice_lib::forge::{CreateParams, Forge};
 use jj_spice_lib::protos::change_request::{ChangeRequests, ForgeMeta};
 use jj_spice_lib::store::SpiceStore;

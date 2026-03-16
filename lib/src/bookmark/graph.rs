@@ -115,7 +115,9 @@ impl<'a> BookmarkGraph<'a> {
     }
 
     /// Iterate bookmarks in topological order (roots first).
-    pub fn iter_graph(&self) -> Result<impl Iterator<Item = &BookmarkNode<'a>>, BookmarkGraphError> {
+    pub fn iter_graph(
+        &self,
+    ) -> Result<impl Iterator<Item = &BookmarkNode<'a>>, BookmarkGraphError> {
         let result = topo_order_forward(
             self.head_bookmarks.iter().map(|name| &self.nodes[name]),
             |node| node.name(),
@@ -156,7 +158,9 @@ impl<'a> BookmarkGraph<'a> {
         Ok(reverse_graph(revset.iter_graph(), |id| id).expect("commit graph should be acyclic"))
     }
 
-    fn build_bookmark_commit_map(repo: &'a (dyn Repo + 'a)) -> HashMap<CommitId, Vec<Arc<Bookmark<'a>>>> {
+    fn build_bookmark_commit_map(
+        repo: &'a (dyn Repo + 'a),
+    ) -> HashMap<CommitId, Vec<Arc<Bookmark<'a>>>> {
         repo.view()
             .bookmarks()
             .filter_map(|(ref_name, ref_target)| {
@@ -592,10 +596,7 @@ mod tests {
             (d.clone(), vec![]),
         ];
 
-        let bookmarks = bookmark_map(vec![
-            (a.clone(), vec!["head"]),
-            (d.clone(), vec!["base"]),
-        ]);
+        let bookmarks = bookmark_map(vec![(a.clone(), vec!["head"]), (d.clone(), vec!["base"])]);
 
         let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
 
