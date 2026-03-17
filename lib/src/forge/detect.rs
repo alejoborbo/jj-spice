@@ -2,13 +2,13 @@ use std::collections::HashMap;
 
 use gix::remote::Direction;
 use jj_lib::config::StackedConfig;
-use jj_lib::git::{get_git_repo, UnexpectedGitBackendError};
+use jj_lib::git::{UnexpectedGitBackendError, get_git_repo};
 use jj_lib::store::Store;
 use thiserror::Error;
 use url::Url;
 
-use super::github::{build_octocrab_for_github, GitHubForge};
 use super::Forge;
+use super::github::{GitHubForge, build_octocrab_for_github};
 
 /// Supported forge type identifiers for interactive selection and config
 /// persistence.
