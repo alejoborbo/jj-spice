@@ -2,13 +2,13 @@ use std::collections::HashMap;
 
 use gix::remote::Direction;
 use jj_lib::config::StackedConfig;
-use jj_lib::git::{UnexpectedGitBackendError, get_git_repo};
+use jj_lib::git::{get_git_repo, UnexpectedGitBackendError};
 use jj_lib::store::Store;
 use thiserror::Error;
 use url::Url;
 
+use super::github::{build_octocrab_for_github, GitHubForge};
 use super::Forge;
-use super::github::GitHubForge;
 
 /// Supported forge type identifiers for interactive selection and config
 /// persistence.
@@ -135,14 +135,18 @@ fn build_forge(
             repo,
             base_url,
         } => {
-            let forge = GitHubForge::new(&owner, &repo, base_url).map_err(|e| {
+            let client = build_octocrab_for_github(base_url.as_ref()).map_err(|e| {
                 ForgeDetectionError::ForgeCreation {
                     remote: remote.to_string(),
                     forge_type: "GitHub",
                     source: Box::new(e),
                 }
             })?;
-            Ok(Box::new(forge))
+            let host = base_url
+                .as_ref()
+                .and_then(|u| u.host_str().map(String::from))
+                .unwrap_or_else(|| "github.com".to_string());
+            Ok(Box::new(GitHubForge::new(client, owner, repo, host)))
         }
     }
 }
@@ -166,14 +170,14 @@ pub fn build_forge_for_type(
             } else {
                 Some(ghe_api_url(hostname))
             };
-            let forge = GitHubForge::new(owner, repo, base_url).map_err(|e| {
+            let client = build_octocrab_for_github(base_url.as_ref()).map_err(|e| {
                 ForgeDetectionError::ForgeCreation {
                     remote: remote.to_string(),
                     forge_type: "GitHub",
                     source: Box::new(e),
                 }
             })?;
-            Ok(Box::new(forge))
+            Ok(Box::new(GitHubForge::new(client, owner, repo, hostname)))
         }
         other => Err(ForgeDetectionError::ForgeCreation {
             remote: remote.to_string(),
@@ -369,25 +373,25 @@ mod tests {
         assert!(FORGE_TYPES.contains(&"github"));
     }
 
-    // -- build_forge_for_type --
+    // -- GitHubForge construction --
 
     #[tokio::test]
-    async fn build_forge_for_type_github_dot_com() {
-        let result = build_forge_for_type("origin", "github", "acme", "widget", "github.com");
-        assert!(result.is_ok());
+    async fn github_forge_new_for_github_dot_com() {
+        let client = octocrab::Octocrab::builder().build().unwrap();
+        let _forge = GitHubForge::new(client, "acme", "widget", "github.com");
     }
 
     #[tokio::test]
-    async fn build_forge_for_type_github_enterprise() {
-        let result = build_forge_for_type(
-            "upstream",
-            "github",
-            "acme",
-            "widget",
-            "git.corp.example.com",
-        );
-        assert!(result.is_ok());
+    async fn github_forge_new_for_github_enterprise() {
+        let client = octocrab::Octocrab::builder()
+            .base_uri("https://git.corp.example.com/api/v3")
+            .unwrap()
+            .build()
+            .unwrap();
+        let _forge = GitHubForge::new(client, "acme", "widget", "git.corp.example.com");
     }
+
+    // -- build_forge_for_type routing --
 
     #[test]
     fn build_forge_for_type_unsupported() {

@@ -128,45 +128,37 @@ pub struct GitHubForge {
     host: String,
 }
 
+/// Build an [`Octocrab`] client for GitHub using a resolved personal token.
+///
+/// Resolves the token via [`resolve_github_token`], then builds an
+/// authenticated client. Pass `base_url` to target a GitHub Enterprise
+/// instance; `None` uses the public GitHub API.
+pub fn build_octocrab_for_github(base_url: Option<&Url>) -> Result<Octocrab, GitHubError> {
+    let token = resolve_github_token().ok_or(GitHubError::MissingToken)?;
+    let mut builder = Octocrab::builder().personal_token(token);
+    if let Some(url) = base_url {
+        builder = builder.base_uri(url.as_str())?;
+    }
+    Ok(builder.build()?)
+}
+
 impl GitHubForge {
-    /// Create a new GitHub forge client.
+    /// Create a new GitHub forge from a pre-built [`Octocrab`] client.
     ///
-    /// Resolves a personal access token via [`resolve_github_token`] and builds
-    /// an HTTP client internally. Pass `base_url` to target a GitHub Enterprise
-    /// instance; `None` uses the public GitHub API.
+    /// The caller is responsible for constructing the client with the desired
+    /// authentication strategy (personal token, OAuth, GitHub App, etc.).
+    /// Use [`build_octocrab_for_github`] for the common personal-token path.
     pub fn new(
+        client: Octocrab,
         owner: impl Into<String>,
         repo: impl Into<String>,
-        base_url: Option<Url>,
-    ) -> Result<Self, GitHubError> {
-        let token = resolve_github_token().ok_or(GitHubError::MissingToken)?;
-        let mut builder = Octocrab::builder().personal_token(token);
-        if let Some(ref url) = base_url {
-            builder = builder.base_uri(url.as_str())?;
-        }
-        let client = builder.build()?;
-        let host = base_url
-            .as_ref()
-            .and_then(|u| u.host_str().map(String::from))
-            .unwrap_or_else(|| "github.com".to_string());
-        Ok(Self {
-            client,
-            owner: owner.into(),
-            repo: repo.into(),
-            host,
-        })
-    }
-
-    /// Build a forge from a pre-constructed [`Octocrab`] client.
-    ///
-    /// Used in tests to inject a client pointed at a mock server.
-    #[cfg(test)]
-    fn with_client(client: Octocrab, owner: impl Into<String>, repo: impl Into<String>) -> Self {
+        host: impl Into<String>,
+    ) -> Self {
         Self {
             client,
             owner: owner.into(),
             repo: repo.into(),
-            host: "github.com".into(),
+            host: host.into(),
         }
     }
 
@@ -464,7 +456,7 @@ mod tests {
 
     /// Build a [`GitHubForge`] backed by the mock server.
     fn mock_forge(uri: &str) -> GitHubForge {
-        GitHubForge::with_client(mock_octocrab(uri), OWNER, REPO)
+        GitHubForge::new(mock_octocrab(uri), OWNER, REPO, "github.com")
     }
 
     /// Minimal GitHub PR JSON response with the fields our code reads.
