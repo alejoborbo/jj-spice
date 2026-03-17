@@ -20,11 +20,6 @@ clap_complete_nushell = { workspace = true }
 dunce = { workspace = true }
 jj-cli = { workspace = true }
 jj-lib = { workspace = true }
-ratatui = { workspace = true }
-termion = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 
-[dev-dependencies]
-serde_json = { workspace = true }
-wiremock = { workspace = true }

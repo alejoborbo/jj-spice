@@ -2537,12 +2537,8 @@ dependencies = [
  "jj-cli",
  "jj-lib",
  "jj-spice-lib",
- "ratatui",
- "serde_json",
- "termion",
  "thiserror 2.0.18",
  "tokio",
- "wiremock",
 ]
 
 [[package]]
@@ -2958,12 +2954,6 @@ checksum = "5c7398b9c8b70908f6371f47ed36737907c87c52af34c268fed0bf0ceb92ead9"
 dependencies = [
  "libc",
 ]
-
-[[package]]
-name = "numtoa"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6aa2c4e539b869820a2b82e1aef6ff40aa85e65decdd5185e83fb4b1249cd00f"
 
 [[package]]
 name = "objc2-core-foundation"
@@ -3518,7 +3508,6 @@ dependencies = [
  "ratatui-core",
  "ratatui-crossterm",
  "ratatui-macros",
- "ratatui-termion",
  "ratatui-termwiz",
  "ratatui-widgets",
 ]
@@ -3563,17 +3552,6 @@ checksum = "a7f1342a13e83e4bb9d0b793d0ea762be633f9582048c892ae9041ef39c936f4"
 dependencies = [
  "ratatui-core",
  "ratatui-widgets",
-]
-
-[[package]]
-name = "ratatui-termion"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cade85a8591fbc911e147951422f0d6fd40f4948b271b6216c7dc01838996f8"
-dependencies = [
- "instability",
- "ratatui-core",
- "termion",
 ]
 
 [[package]]
@@ -4379,16 +4357,6 @@ dependencies = [
  "nom",
  "phf",
  "phf_codegen",
-]
-
-[[package]]
-name = "termion"
-version = "4.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f44138a9ae08f0f502f24104d82517ef4da7330c35acd638f1f29d3cd5475ecb"
-dependencies = [
- "libc",
- "numtoa",
 ]
 
 [[package]]
