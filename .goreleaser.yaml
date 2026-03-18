@@ -17,7 +17,7 @@ builds:
     flags:
       - --release
       - -p
-      - jj-spice-cli
+      - --package=jj-spice-cli
 
 archives:
   - format_overrides:
