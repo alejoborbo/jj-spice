@@ -9,7 +9,7 @@ use jj_lib::{
     dag_walk::topo_order_forward,
     graph::{GraphEdge, GraphNode, reverse_graph},
     repo::Repo,
-    revset::{RevsetEvaluationError, RevsetExpression},
+    revset::{ResolvedRevsetExpression, RevsetEvaluationError, RevsetExpression},
 };
 use thiserror::Error;
 
@@ -92,13 +92,54 @@ impl<'a> BookmarkGraph<'a> {
     /// Both should be pre-resolved commit IDs. Typically `trunk` comes from
     /// evaluating the `trunk()` revset alias, and `head` is the working-copy
     /// commit (`@`).
+    ///
+    /// Used by `stack submit` and `stack sync` which operate on the single
+    /// stack under the working copy.
     pub fn new(
         repo: &'a (dyn Repo + 'a),
         trunk: &CommitId,
         head: &CommitId,
     ) -> Result<Self, BookmarkGraphError> {
+        let heads_expr = RevsetExpression::commit(head.clone());
+        Self::build(repo, trunk, &heads_expr)
+    }
+
+    /// Build a bookmark graph covering **all** local bookmarks between `trunk`
+    /// and the heads of every local bookmark.
+    ///
+    /// This produces the union of all in-flight stacks the user has locally,
+    /// matching the spirit of `jj log` which shows all visible history.
+    /// Remote-only bookmarks (from other contributors) are excluded.
+    pub fn all_local(
+        repo: &'a (dyn Repo + 'a),
+        trunk: &CommitId,
+    ) -> Result<Self, BookmarkGraphError> {
         let bookmarks_per_commit = Self::build_bookmark_commit_map(repo);
-        let reversed = Self::evaluate_branch_commits(repo, trunk, head)?;
+        let commit_ids: Vec<CommitId> = bookmarks_per_commit.keys().cloned().collect();
+        if commit_ids.is_empty() {
+            return Ok(Self {
+                nodes: HashMap::new(),
+                edges: HashMap::new(),
+                head_bookmarks: HashSet::new(),
+            });
+        }
+        let heads_expr = RevsetExpression::commits(commit_ids);
+        Self::build(repo, trunk, &heads_expr)
+    }
+
+    /// Build a bookmark graph from an arbitrary resolved revset expression.
+    ///
+    /// The expression is evaluated against the repo to produce the set of
+    /// commits. Only bookmarks whose commit falls within this set appear
+    /// in the graph.
+    pub fn from_revset(
+        repo: &'a (dyn Repo + 'a),
+        expression: Arc<ResolvedRevsetExpression>,
+    ) -> Result<Self, BookmarkGraphError> {
+        let bookmarks_per_commit = Self::build_bookmark_commit_map(repo);
+        let revset = expression.evaluate(repo)?;
+        let reversed =
+            reverse_graph(revset.iter_graph(), |id| id).expect("commit graph should be acyclic");
         let (nodes, edges) = Self::build_bookmark_graph(&reversed, &bookmarks_per_commit);
         let head_bookmarks = Self::find_head_bookmarks(&edges);
         Ok(Self {
@@ -131,20 +172,38 @@ impl<'a> BookmarkGraph<'a> {
         Ok(result.into_iter())
     }
 
+    /// Shared constructor: evaluate `trunk..heads` and build the bookmark
+    /// graph from the resulting commit DAG.
+    fn build(
+        repo: &'a (dyn Repo + 'a),
+        trunk: &CommitId,
+        heads: &Arc<ResolvedRevsetExpression>,
+    ) -> Result<Self, BookmarkGraphError> {
+        let bookmarks_per_commit = Self::build_bookmark_commit_map(repo);
+        let reversed = Self::evaluate_branch_commits(repo, trunk, heads)?;
+        let (nodes, edges) = Self::build_bookmark_graph(&reversed, &bookmarks_per_commit);
+        let head_bookmarks = Self::find_head_bookmarks(&edges);
+        Ok(Self {
+            nodes,
+            edges,
+            head_bookmarks,
+        })
+    }
+
+    /// Evaluate all commits between `trunk` (exclusive) and `heads`
+    /// (inclusive).
+    ///
+    /// Uses the `trunk..heads` revset which naturally captures every root
+    /// and every path, avoiding the previous bug where only the first root
+    /// was used and descendants were unbounded.
     fn evaluate_branch_commits(
         repo: &dyn Repo,
         trunk: &CommitId,
-        head: &CommitId,
+        heads: &Arc<ResolvedRevsetExpression>,
     ) -> Result<Vec<GraphNode<CommitId>>, BookmarkGraphError> {
-        // This is equivalent to the following expression in revset language: `descendants(roots(trunk()..@)`
-        // In this expression, we're retrieving the roots of the current changes (@)
-        // Once the roots are retrieved, we're retrieving the descendants of the roots to build the
-        // graph
         let trunk_expr = RevsetExpression::commit(trunk.clone());
-        let head_expr = RevsetExpression::commit(head.clone());
-        let roots = trunk_expr.range(&head_expr).roots();
-        let expression = roots.descendants();
-        let revset = expression.evaluate(repo)?;
+        let range = trunk_expr.range(heads);
+        let revset = range.evaluate(repo)?;
         Ok(reverse_graph(revset.iter_graph(), |id| id).expect("commit graph should be acyclic"))
     }
 
@@ -722,5 +781,64 @@ mod tests {
         // feat-1 and feat-2 should have no ascendants (they are heads)
         assert!(nodes["feat-1"].ascendants().is_empty());
         assert!(nodes["feat-2"].ascendants().is_empty());
+    }
+
+    #[test]
+    fn build_bookmark_graph_disjoint_stacks_all_discovered() {
+        // Models the `all_local` scenario: two completely independent stacks
+        // off trunk with no shared commits. Using all local bookmark commit
+        // IDs as heads for `trunk..heads` produces a reversed graph containing
+        // both stacks, and build_bookmark_graph must discover all of them.
+        //
+        //  Stack 1:        Stack 2:
+        //  A (feat-a)      C (feat-c)
+        //  |               |
+        //  B (feat-b)      D (feat-d)
+        //
+        // No edges between the two stacks.
+        let a = commit_id(1);
+        let b = commit_id(2);
+        let c = commit_id(3);
+        let d = commit_id(4);
+
+        let reversed: Vec<GraphNode<CommitId>> = vec![
+            (a.clone(), vec![GraphEdge::direct(b.clone())]),
+            (b.clone(), vec![]),
+            (c.clone(), vec![GraphEdge::direct(d.clone())]),
+            (d.clone(), vec![]),
+        ];
+
+        let bookmarks = bookmark_map(vec![
+            (a.clone(), vec!["feat-a"]),
+            (b.clone(), vec!["feat-b"]),
+            (c.clone(), vec!["feat-c"]),
+            (d.clone(), vec!["feat-d"]),
+        ]);
+
+        let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+
+        // All four bookmarks across both stacks must be present.
+        assert_eq!(
+            nodes.len(),
+            4,
+            "expected 4 bookmark nodes, got: {:?}",
+            nodes.keys().collect::<Vec<_>>()
+        );
+
+        // Stack 1: feat-a is head, feat-b descends from feat-a.
+        assert!(nodes["feat-a"].ascendants().is_empty());
+        assert_eq!(nodes["feat-b"].ascendants(), &["feat-a"]);
+        let b_targets: Vec<&str> = edges["feat-b"].iter().map(|e| e.target.as_str()).collect();
+        assert_eq!(b_targets, vec!["feat-a"]);
+
+        // Stack 2: feat-c is head, feat-d descends from feat-c.
+        assert!(nodes["feat-c"].ascendants().is_empty());
+        assert_eq!(nodes["feat-d"].ascendants(), &["feat-c"]);
+        let d_targets: Vec<&str> = edges["feat-d"].iter().map(|e| e.target.as_str()).collect();
+        assert_eq!(d_targets, vec!["feat-c"]);
+
+        // The two stacks are independent — no cross-edges.
+        assert!(edges["feat-a"].is_empty());
+        assert!(edges["feat-c"].is_empty());
     }
 }

@@ -16,8 +16,8 @@ use jj_lib::ref_name::RemoteNameBuf;
 use jj_lib::repo::{ReadonlyRepo, StoreFactories};
 use jj_lib::repo_path::RepoPathUiConverter;
 use jj_lib::revset::{
-    RevsetAliasesMap, RevsetDiagnostics, RevsetExtensions, RevsetParseContext,
-    RevsetWorkspaceContext,
+    ResolvedRevsetExpression, RevsetAliasesMap, RevsetDiagnostics, RevsetExtensions,
+    RevsetParseContext, RevsetWorkspaceContext,
 };
 use jj_lib::settings::UserSettings;
 use jj_lib::workspace::{Workspace, default_working_copy_factories};
@@ -168,6 +168,32 @@ impl SpiceEnv {
                 Err(format!("revset `{revision}` resolved to more than one revision").into())
             }
         }
+    }
+
+    /// Parse and resolve a revset expression string into a resolved expression.
+    ///
+    /// Unlike [`Self::resolve_single_rev`], this does not require the revset
+    /// to resolve to exactly one commit — it can match any number of commits.
+    /// The returned expression can be passed to
+    /// [`BookmarkGraph::from_revset`][jj_spice_lib::bookmark::graph::BookmarkGraph::from_revset].
+    pub(crate) fn resolve_revset(
+        &self,
+        revset_str: &str,
+    ) -> Result<Arc<ResolvedRevsetExpression>, Box<dyn std::error::Error>> {
+        let context = self.revset_parse_context();
+        let mut diagnostics = RevsetDiagnostics::new();
+        let expression = jj_lib::revset::parse(&mut diagnostics, revset_str, &context)?;
+        print_parse_diagnostics(&self.ui, "In revset expression", &diagnostics)?;
+
+        let id_prefix_context = IdPrefixContext::default();
+        let evaluator = RevsetExpressionEvaluator::new(
+            self.repo.as_ref(),
+            self.revset_extensions.clone(),
+            &id_prefix_context,
+            expression,
+        );
+
+        Ok(evaluator.resolve()?)
     }
 }
 

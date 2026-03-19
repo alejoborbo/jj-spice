@@ -54,15 +54,21 @@ const TRUNK_SYMBOL: &str = "\u{25c6}";
 
 /// Show the bookmark DAG with change request status.
 ///
-/// Builds the bookmark graph between trunk and head, loads any tracked
-/// change request metadata, queries forges for live status, and renders
-/// the result as a graphlog.
+/// Builds a bookmark graph covering either all local bookmarks (default)
+/// or the set of commits matching the given revset expression, loads any
+/// tracked change request metadata, queries forges for live status, and
+/// renders the result as a graphlog.
 pub async fn run(
     env: &SpiceEnv,
     trunk: &CommitId,
-    head: &CommitId,
+    revisions: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let graph = BookmarkGraph::new(env.repo.as_ref(), trunk, head)?;
+    let graph = if let Some(rev_str) = revisions {
+        let resolved = env.resolve_revset(rev_str)?;
+        BookmarkGraph::from_revset(env.repo.as_ref(), resolved)?
+    } else {
+        BookmarkGraph::all_local(env.repo.as_ref(), trunk)?
+    };
 
     // Resolve the trunk bookmark name so we can show it at the bottom.
     let trunk_name = resolve_trunk_bookmark_name(env, trunk);

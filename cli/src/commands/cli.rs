@@ -45,11 +45,25 @@ pub struct StackArgs {
 #[derive(Subcommand, Clone, Debug)]
 pub enum StackCommand {
     /// Show the bookmark DAG with change request status.
-    Log,
+    Log(LogArgs),
     /// Submit the current stack of bookmarks for review.
     Submit,
     /// Discover and track existing change requests for bookmarks in the stack.
     Sync(SyncArgs),
+}
+
+/// Arguments for `jj-spice stack log`.
+#[derive(Args, Clone, Debug)]
+pub struct LogArgs {
+    /// Which revisions to show bookmarks for.
+    ///
+    /// Accepts any jj revset expression. Only bookmarks whose commit falls
+    /// within the evaluated set are shown.
+    ///
+    /// Defaults to all local bookmarks (equivalent to `trunk()..bookmarks()`).
+    /// Use `-r 'trunk()..@'` to see only the current stack.
+    #[arg(short = 'r', long)]
+    pub revisions: Option<String>,
 }
 
 /// Arguments for `jj-spice stack sync`.
@@ -138,12 +152,41 @@ mod tests {
     #[test]
     fn parse_stack_log() {
         let cli = Cli::try_parse_from(["jj-spice", "stack", "log"]).unwrap();
-        assert!(matches!(
-            cli.command,
+        match cli.command {
             SpiceCommand::Stack(StackArgs {
-                command: StackCommand::Log
-            })
-        ));
+                command: StackCommand::Log(args),
+            }) => assert!(args.revisions.is_none()),
+            _ => panic!("expected Log"),
+        }
+    }
+
+    #[test]
+    fn parse_stack_log_with_revisions() {
+        let cli = Cli::try_parse_from(["jj-spice", "stack", "log", "-r", "trunk()..@"]).unwrap();
+        match cli.command {
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Log(args),
+            }) => assert_eq!(args.revisions.as_deref(), Some("trunk()..@")),
+            _ => panic!("expected Log"),
+        }
+    }
+
+    #[test]
+    fn parse_stack_log_with_long_revisions() {
+        let cli = Cli::try_parse_from([
+            "jj-spice",
+            "stack",
+            "log",
+            "--revisions",
+            "bookmarks() & mine()",
+        ])
+        .unwrap();
+        match cli.command {
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Log(args),
+            }) => assert_eq!(args.revisions.as_deref(), Some("bookmarks() & mine()")),
+            _ => panic!("expected Log"),
+        }
     }
 
     #[test]

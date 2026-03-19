@@ -44,32 +44,45 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                  'trunk()' = 'main@origin'"
             })?;
 
-            let head = env
-                .resolve_single_rev(&RevisionArg::AT)
-                .map_err(|e| format!("failed to resolve @: {e}"))?;
-
             let rt = tokio::runtime::Runtime::new()?;
 
             match stack_args.command {
-                StackCommand::Log => rt.block_on(stack_log::run(&env, &trunk, &head)),
-                StackCommand::Submit => rt.block_on(async {
-                    let detection = detect_forges(env.repo.store(), env.config())?;
-                    let forge = detection
-                        .forges
-                        .into_values()
-                        .next()
-                        .ok_or("no forge detected — is a git remote configured?")?;
-                    let trunk_name = env
-                        .repo
-                        .view()
-                        .bookmarks()
-                        .find(|(_, target)| target.local_target.as_normal() == Some(&trunk))
-                        .map(|(name, _)| name.as_str().to_string())
-                        .ok_or("no bookmark found at trunk commit")?;
-                    stack_submit::run(&env, forge.as_ref(), &env.store, &trunk, &head, &trunk_name)
+                StackCommand::Log(log_args) => {
+                    rt.block_on(stack_log::run(&env, &trunk, log_args.revisions.as_deref()))
+                }
+                StackCommand::Submit => {
+                    let head = env
+                        .resolve_single_rev(&RevisionArg::AT)
+                        .map_err(|e| format!("failed to resolve @: {e}"))?;
+                    rt.block_on(async {
+                        let detection = detect_forges(env.repo.store(), env.config())?;
+                        let forge = detection
+                            .forges
+                            .into_values()
+                            .next()
+                            .ok_or("no forge detected — is a git remote configured?")?;
+                        let trunk_name = env
+                            .repo
+                            .view()
+                            .bookmarks()
+                            .find(|(_, target)| target.local_target.as_normal() == Some(&trunk))
+                            .map(|(name, _)| name.as_str().to_string())
+                            .ok_or("no bookmark found at trunk commit")?;
+                        stack_submit::run(
+                            &env,
+                            forge.as_ref(),
+                            &env.store,
+                            &trunk,
+                            &head,
+                            &trunk_name,
+                        )
                         .await
-                }),
+                    })
+                }
                 StackCommand::Sync(sync_args) => {
+                    let head = env
+                        .resolve_single_rev(&RevisionArg::AT)
+                        .map_err(|e| format!("failed to resolve @: {e}"))?;
                     rt.block_on(stack_sync::run(&env, &trunk, &head, sync_args.force))
                 }
             }
