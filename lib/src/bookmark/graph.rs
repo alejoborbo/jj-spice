@@ -136,7 +136,7 @@ impl<'a> BookmarkGraph<'a> {
         trunk: &CommitId,
         head: &CommitId,
     ) -> Result<Vec<GraphNode<CommitId>>, BookmarkGraphError> {
-        // This is equivalent to the following expression in revset language: `descendants(roots(trunk()..@)` 
+        // This is equivalent to the following expression in revset language: `descendants(roots(trunk()..@)`
         // In this expression, we're retrieving the roots of the current changes (@)
         // Once the roots are retrieved, we're retrieving the descendants of the roots to build the
         // graph
