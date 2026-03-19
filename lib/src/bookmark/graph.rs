@@ -72,8 +72,6 @@ impl<'a> BookmarkNode<'a> {
 pub enum BookmarkGraphError {
     #[error("revset evaluation failed")]
     RevsetEvaluation(#[from] RevsetEvaluationError),
-    #[error("no root commit found in branch")]
-    NoRootCommit,
     #[error("cycle detected in bookmark graph")]
     Cycle,
 }
@@ -131,30 +129,20 @@ impl<'a> BookmarkGraph<'a> {
         Ok(result.into_iter())
     }
 
-    fn find_root_commit(
-        repo: &dyn Repo,
-        trunk: &CommitId,
-        head: &CommitId,
-    ) -> Result<CommitId, BookmarkGraphError> {
-        let trunk_expr = RevsetExpression::commit(trunk.clone());
-        let head_expr = RevsetExpression::commit(head.clone());
-        let roots = trunk_expr.range(&head_expr).roots();
-        let expression = roots.evaluate(repo)?;
-        expression
-            .iter()
-            .next()
-            .and_then(|r| r.ok())
-            .ok_or(BookmarkGraphError::NoRootCommit)
-    }
-
+    /// Evaluate all commits between `trunk` (exclusive) and `head` (inclusive).
+    ///
+    /// Uses the `trunk..head` revset which naturally captures every root and
+    /// every path, avoiding the previous bug where only the first root was
+    /// used and descendants were unbounded.
     fn evaluate_branch_commits(
         repo: &dyn Repo,
         trunk: &CommitId,
         head: &CommitId,
     ) -> Result<Vec<GraphNode<CommitId>>, BookmarkGraphError> {
-        let first_commit = Self::find_root_commit(repo, trunk, head)?;
-        let expression = RevsetExpression::commit(first_commit).descendants();
-        let revset = expression.evaluate(repo)?;
+        let trunk_expr = RevsetExpression::commit(trunk.clone());
+        let head_expr = RevsetExpression::commit(head.clone());
+        let range = trunk_expr.range(&head_expr);
+        let revset = range.evaluate(repo)?;
         Ok(reverse_graph(revset.iter_graph(), |id| id).expect("commit graph should be acyclic"))
     }
 
@@ -732,5 +720,187 @@ mod tests {
         // feat-1 and feat-2 should have no ascendants (they are heads)
         assert!(nodes["feat-1"].ascendants().is_empty());
         assert!(nodes["feat-2"].ascendants().is_empty());
+    }
+
+    #[test]
+    fn build_bookmark_graph_parent_with_multiple_children() {
+        // Regression test modelling the dd-go scenario where a single parent
+        // bookmark fans out into several children:
+        //
+        //        A (scheduler-cdk8s-library)
+        //       /|\ \
+        //      B  C  D  E
+        //  (deployment) (monitoring) (networking) (storage)
+        //
+        // The reversed graph (parent → children) has A as the single head and
+        // B, C, D, E as leaves. All children must list A as their ascendant.
+        let a = commit_id(1);
+        let b = commit_id(2);
+        let c = commit_id(3);
+        let d = commit_id(4);
+        let e = commit_id(5);
+
+        let reversed: Vec<GraphNode<CommitId>> = vec![
+            (
+                a.clone(),
+                vec![
+                    GraphEdge::direct(b.clone()),
+                    GraphEdge::direct(c.clone()),
+                    GraphEdge::direct(d.clone()),
+                    GraphEdge::direct(e.clone()),
+                ],
+            ),
+            (b.clone(), vec![]),
+            (c.clone(), vec![]),
+            (d.clone(), vec![]),
+            (e.clone(), vec![]),
+        ];
+
+        let bookmarks = bookmark_map(vec![
+            (a.clone(), vec!["scheduler-cdk8s-library"]),
+            (b.clone(), vec!["scheduler-cdk8s-deployment"]),
+            (c.clone(), vec!["scheduler-cdk8s-monitoring"]),
+            (d.clone(), vec!["scheduler-cdk8s-networking"]),
+            (e.clone(), vec!["scheduler-cdk8s-storage"]),
+        ]);
+
+        let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+
+        // All five bookmarks must be discovered.
+        assert_eq!(
+            nodes.len(),
+            5,
+            "expected 5 bookmark nodes, got: {:?}",
+            nodes.keys().collect::<Vec<_>>()
+        );
+
+        // The library bookmark is the root (no ascendants).
+        assert!(
+            nodes["scheduler-cdk8s-library"].ascendants().is_empty(),
+            "library should be a root, got ascendants: {:?}",
+            nodes["scheduler-cdk8s-library"].ascendants()
+        );
+
+        // Every child bookmark must have exactly the library as ascendant.
+        for child in [
+            "scheduler-cdk8s-deployment",
+            "scheduler-cdk8s-monitoring",
+            "scheduler-cdk8s-networking",
+            "scheduler-cdk8s-storage",
+        ] {
+            assert_eq!(
+                nodes[child].ascendants(),
+                &["scheduler-cdk8s-library"],
+                "{child} should descend from scheduler-cdk8s-library, got: {:?}",
+                nodes[child].ascendants()
+            );
+
+            // Edge should point back to library.
+            let targets: Vec<&str> = edges[child].iter().map(|e| e.target.as_str()).collect();
+            assert_eq!(
+                targets,
+                vec!["scheduler-cdk8s-library"],
+                "{child} edge should point to scheduler-cdk8s-library, got: {targets:?}"
+            );
+        }
+
+        // The library bookmark should have no edges (it is a head in the
+        // reversed graph, meaning a root in the original DAG).
+        assert!(
+            edges["scheduler-cdk8s-library"].is_empty(),
+            "library should have no parent edges, got: {:?}",
+            edges["scheduler-cdk8s-library"]
+        );
+    }
+
+    #[test]
+    fn build_bookmark_graph_multiple_roots_converge() {
+        // Regression test: two independent paths from trunk converge at a
+        // shared descendant. The old implementation only followed one root
+        // (via find_root_commit().next()), missing the other sub-stack.
+        //
+        // The commit graph between trunk and head looks like:
+        //
+        //   R1 (library)        R2 (other-base)
+        //    |                   |
+        //    A (library-impl)    B (other-impl)
+        //     \                 /
+        //      C (deployment)  ← head / @
+        //
+        // With trunk..head, both R1 and R2 are included as roots.
+        // Previously, only one root was picked, losing the other branch.
+        let r1 = commit_id(1);
+        let r2 = commit_id(2);
+        let a = commit_id(3);
+        let b = commit_id(4);
+        let c = commit_id(5);
+
+        // Reversed graph: heads (no incoming edges) are R1 and R2.
+        let reversed: Vec<GraphNode<CommitId>> = vec![
+            (r1.clone(), vec![GraphEdge::direct(a.clone())]),
+            (r2.clone(), vec![GraphEdge::direct(b.clone())]),
+            (a.clone(), vec![GraphEdge::direct(c.clone())]),
+            (b.clone(), vec![GraphEdge::direct(c.clone())]),
+            (c.clone(), vec![]),
+        ];
+
+        let bookmarks = bookmark_map(vec![
+            (r1.clone(), vec!["library"]),
+            (a.clone(), vec!["library-impl"]),
+            (r2.clone(), vec!["other-base"]),
+            (b.clone(), vec!["other-impl"]),
+            (c.clone(), vec!["deployment"]),
+        ]);
+
+        let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+
+        // All five bookmarks must be discovered.
+        assert_eq!(
+            nodes.len(),
+            5,
+            "expected 5 bookmark nodes, got: {:?}",
+            nodes.keys().collect::<Vec<_>>()
+        );
+        assert!(nodes.contains_key("library"));
+        assert!(nodes.contains_key("library-impl"));
+        assert!(nodes.contains_key("other-base"));
+        assert!(nodes.contains_key("other-impl"));
+        assert!(nodes.contains_key("deployment"));
+
+        // library and other-base are root bookmarks (no ascendants).
+        assert!(
+            nodes["library"].ascendants().is_empty(),
+            "library should be a root, got ascendants: {:?}",
+            nodes["library"].ascendants()
+        );
+        assert!(
+            nodes["other-base"].ascendants().is_empty(),
+            "other-base should be a root, got ascendants: {:?}",
+            nodes["other-base"].ascendants()
+        );
+
+        // library-impl descends from library.
+        assert_eq!(nodes["library-impl"].ascendants(), &["library"]);
+
+        // other-impl descends from other-base.
+        assert_eq!(nodes["other-impl"].ascendants(), &["other-base"]);
+
+        // deployment descends from both library-impl and other-impl.
+        let deploy_ascendants = nodes["deployment"].ascendants();
+        assert_eq!(
+            deploy_ascendants.len(),
+            2,
+            "deployment should have 2 ascendants, got: {deploy_ascendants:?}"
+        );
+        assert!(deploy_ascendants.contains(&"library-impl".to_string()));
+        assert!(deploy_ascendants.contains(&"other-impl".to_string()));
+
+        // Edges should mirror the ascendant relationships.
+        let deploy_edge_targets: HashSet<&str> = edges["deployment"]
+            .iter()
+            .map(|e| e.target.as_str())
+            .collect();
+        assert!(deploy_edge_targets.contains("library-impl"));
+        assert!(deploy_edge_targets.contains("other-impl"));
     }
 }
