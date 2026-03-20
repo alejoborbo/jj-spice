@@ -3,8 +3,8 @@ use std::process::Command;
 
 use http_body_util::BodyExt;
 use octocrab::Octocrab;
-use octocrab::models::IssueState;
 use octocrab::models::pulls::PullRequest;
+use octocrab::models::{CommentId, IssueState};
 use url::Url;
 
 use crate::forge::{
@@ -459,6 +459,33 @@ impl Forge for GitHubForge {
                 .await
                 .map_err(GitHubError::Api)?;
             Ok(Box::new(github_cr_from_pr(&pr, &self.host)) as Box<dyn ChangeRequest>)
+        })
+    }
+
+    fn update_or_create_comment<'a>(
+        &'a self,
+        meta: &'a ForgeMeta,
+        comment: &'a str,
+    ) -> BoxFuture<'a, Result<u64, Box<dyn std::error::Error>>> {
+        Box::pin(async move {
+            let gh = Self::extract_meta(meta)?;
+            let issues_handler = self.client.issues(&self.owner, &self.repo);
+
+            // If a comment ID is present, update the comment.
+            if let Some(comment_id) = gh.comment_id {
+                issues_handler
+                    .update_comment(CommentId(comment_id), comment)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                return Ok(comment_id);
+            }
+
+            // Otherwise, create a new comment.
+            let pr_comment = issues_handler
+                .create_comment(gh.number, comment)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(pr_comment.id.0)
         })
     }
 

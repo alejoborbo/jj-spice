@@ -22,4 +22,5 @@ jj-cli = { workspace = true }
 jj-lib = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+itertools.workspace = true
 

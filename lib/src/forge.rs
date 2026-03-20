@@ -144,6 +144,15 @@ pub trait Forge: Send + Sync {
     /// Close a change request without merging.
     fn close<'a>(&'a self, meta: &'a ForgeMeta) -> BoxFuture<'a, ForgeResult>;
 
+    /// Update or create a comment on a change request.
+    ///
+    /// Return the ID of the comment if it was created, or the ID of the
+    fn update_or_create_comment<'a>(
+        &'a self,
+        meta: &'a ForgeMeta,
+        comment: &'a str,
+    ) -> BoxFuture<'a, Result<u64, Box<dyn std::error::Error>>>;
+
     /// Find change requests matching `source_branch` and return persistable metadata.
     ///
     /// This is a convenience wrapper around [`Forge::find`] that extracts
