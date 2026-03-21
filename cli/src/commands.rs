@@ -34,7 +34,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         },
 
         SpiceCommand::Stack(stack_args) => {
-            let env = SpiceEnv::init(&global_args)?;
+            let mut env = SpiceEnv::init(&global_args)?;
 
             let trunk_rev = RevisionArg::from("trunk()".to_string());
             let trunk = env.resolve_single_rev(&trunk_rev).map_err(|_| {
@@ -68,15 +68,8 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             .find(|(_, target)| target.local_target.as_normal() == Some(&trunk))
                             .map(|(name, _)| name.as_str().to_string())
                             .ok_or("no bookmark found at trunk commit")?;
-                        stack_submit::run(
-                            &env,
-                            forge.as_ref(),
-                            &env.store,
-                            &trunk,
-                            &head,
-                            &trunk_name,
-                        )
-                        .await
+                        stack_submit::run(&mut env, forge.as_ref(), &trunk, &head, &trunk_name)
+                            .await
                     })
                 }
                 StackCommand::Sync(sync_args) => {

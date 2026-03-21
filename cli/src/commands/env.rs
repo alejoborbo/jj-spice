@@ -21,7 +21,6 @@ use jj_lib::revset::{
 };
 use jj_lib::settings::UserSettings;
 use jj_lib::workspace::{Workspace, default_working_copy_factories};
-
 use jj_spice_lib::store::SpiceStore;
 
 /// Shared context built once from the jj config pipeline and workspace.

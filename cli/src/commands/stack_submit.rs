@@ -12,24 +12,22 @@ use jj_spice_lib::bookmark::graph::BookmarkGraph;
 use jj_spice_lib::comments::Comment;
 use jj_spice_lib::forge::{CreateParams, Forge};
 use jj_spice_lib::protos::change_request::{ChangeRequests, ForgeMeta};
-use jj_spice_lib::store::SpiceStore;
 use jj_spice_lib::store::change_request::ChangeRequestStore;
 
 use crate::commands::env::SpiceEnv;
 
 /// Create change requests for each bookmark in the current stack (trunk..@).
 pub async fn run(
-    env: &SpiceEnv,
+    env: &mut SpiceEnv,
     forge: &dyn Forge,
-    store: &SpiceStore,
     trunk: &CommitId,
     head: &CommitId,
     trunk_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let cr_store = ChangeRequestStore::new(store);
-    let graph = BookmarkGraph::new(env.repo.as_ref(), trunk, head)?;
+    let mut state = ChangeRequestStore::new(&env.store).load()?;
+    let repo = env.repo.clone();
+    let graph = BookmarkGraph::new(repo.as_ref(), trunk, head)?;
     let text_editor = TextEditor::from_settings(&env.settings)?;
-    let mut state = cr_store.load()?;
 
     // Iter on the graphs to create the change requests.
     for bookmark_node in graph.iter_graph()? {
@@ -37,7 +35,7 @@ pub async fn run(
         let ascendants = bookmark_node.ascendants();
 
         // Check for untracked changes in the bookmark and push them if the user agrees.
-        check_untracked_changes(&env.ui, env, bookmark)?;
+        check_untracked_changes(env, bookmark)?;
 
         // If the change request already exists, retarget if needed.
         let existing = get_existing_change_request(&env.ui, &state, forge, bookmark.name()).await?;
@@ -118,7 +116,7 @@ pub async fn run(
     }
 
     // Save the CRs to the store.
-    cr_store.save(&state)?;
+    ChangeRequestStore::new(&env.store).save(&state)?;
 
     // Once the change requests have been created, update the PR comments to add the stack trace.
     // Fetch all change request for all bookmark presents in the graph.
@@ -150,21 +148,20 @@ pub async fn run(
     }
 
     // Persist the updated comment IDs to disk.
-    cr_store.save(&state)?;
+    ChangeRequestStore::new(&env.store).save(&state)?;
 
     Ok(())
 }
 
 /// Check for untracked changes in the bookmark and push them if the user agrees.
 fn check_untracked_changes(
-    ui: &jj_cli::ui::Ui,
-    env: &SpiceEnv,
+    env: &mut SpiceEnv,
     bookmark: &Bookmark,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let remote = env.get_default_remote();
     let local_remote_target = bookmark.remote_ref(&remote).ok_or_else(|| {
         let _ = writeln!(
-            ui.hint_default(),
+            env.ui.hint_default(),
             "No remote ref found for bookmark {name}. Run `jj bookmark track {name} --remote={remote}` to \
              track it.",
             name = bookmark.name(),
@@ -176,13 +173,13 @@ fn check_untracked_changes(
         BookmarkPushAction::AlreadyMatches => {}
         BookmarkPushAction::Update(push_update) => {
             writeln!(
-                ui.warning_default(),
+                env.ui.warning_default(),
                 "Untracked changes have been detected. Do you want to push them?",
             )?;
-            if ui.prompt_yes_no("Push changes?", Some(true))? {
+            if env.ui.prompt_yes_no("Push changes?", Some(true))? {
                 push_bookmarks(env, &remote, bookmark, push_update)?;
                 writeln!(
-                    ui.stdout_formatter(),
+                    env.ui.stdout_formatter(),
                     "Pushed {} to {}",
                     bookmark.name(),
                     remote.as_str(),
@@ -191,7 +188,7 @@ fn check_untracked_changes(
         }
         action => {
             writeln!(
-                ui.warning_default(),
+                env.ui.warning_default(),
                 "Bookmark {} has unexpected state: {:?}",
                 bookmark.name(),
                 action,
@@ -253,7 +250,7 @@ async fn get_existing_change_request(
 }
 
 fn push_bookmarks(
-    env: &SpiceEnv,
+    env: &mut SpiceEnv,
     remote_name: &RemoteNameBuf,
     bookmark: &Bookmark,
     push_update: BookmarkPushUpdate,
@@ -272,9 +269,10 @@ fn push_bookmarks(
     )?;
 
     print_push_stats(&env.ui, &push_stats)?;
-    if push_stats.all_ok() {
-        Ok(())
-    } else {
-        Err("Failed to push some bookmarks".into())
+    if !push_stats.all_ok() {
+        return Err("Failed to push some bookmarks".into());
     }
+
+    env.repo = tx.commit("push bookmarks to remote")?;
+    Ok(())
 }
