@@ -117,40 +117,50 @@ pub async fn run(
         )?;
     }
 
-    // Save the CRs to the store.
+    // Post stack-trace comments on all CRs concurrently.
+    post_stack_comments(forge, &graph, &mut state).await?;
+
+    // Persist CRs and comment IDs to disk.
     cr_store.save(&state)?;
 
-    // Once the change requests have been created, update the PR comments to add the stack trace.
-    // Fetch all change request for all bookmark presents in the graph.
-    let metas_per_bookmark: Vec<(&Bookmark, ForgeMeta)> = graph
+    Ok(())
+}
+
+/// Post stack-trace comments on all change requests concurrently.
+async fn post_stack_comments(
+    forge: &dyn Forge,
+    graph: &BookmarkGraph<'_>,
+    state: &mut ChangeRequests,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Build comment text + metadata for each bookmark in one pass.
+    let comment_tasks: Vec<(String, ForgeMeta, String)> = graph
         .iter_graph()
         .unwrap()
         .unique_by(|n| n.bookmark().name())
         .map(|n| {
-            (
-                n.bookmark(),
-                state.get(n.bookmark().name()).unwrap().clone(),
-            )
+            let bookmark = n.bookmark();
+            let meta = state.get(bookmark.name()).unwrap().clone();
+            let comment_text = Comment::new(bookmark, graph, state)
+                .to_string()
+                .expect("Failed to serialize comment");
+            (bookmark.name().to_string(), meta, comment_text)
         })
         .collect();
 
-    for (bookmark, meta) in metas_per_bookmark {
-        let comment = Comment::new(bookmark, &graph, &state)
-            .to_string()
-            .expect("Failed to serialize comment");
+    // Fire all comment API calls concurrently.
+    let futures: Vec<_> = comment_tasks
+        .iter()
+        .map(|(_, meta, comment_text)| forge.update_or_create_comment(meta, comment_text))
+        .collect();
+    let results = futures::future::join_all(futures).await;
 
-        let comment_id = forge
-            .update_or_create_comment(&meta, comment.as_str())
-            .await?;
-
-        // Update the forge metadata with the comment id.
-        let mut updated_meta = state.get(bookmark.name()).unwrap().clone();
+    // Collect results and update state with comment IDs.
+    for (result, (name, _, _)) in results.into_iter().zip(&comment_tasks) {
+        let comment_id = result?;
+        let mut updated_meta = state.get(name).unwrap().clone();
         updated_meta.set_comment_id(comment_id);
-        state.set(bookmark.name().to_string(), updated_meta);
+        state.set(name.clone(), updated_meta);
     }
-
-    // Persist the updated comment IDs to disk.
-    cr_store.save(&state)?;
 
     Ok(())
 }

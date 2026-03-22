@@ -2554,6 +2554,7 @@ dependencies = [
  "clap_complete",
  "clap_complete_nushell",
  "dunce",
+ "futures 0.3.32",
  "itertools",
  "jj-cli",
  "jj-lib",
