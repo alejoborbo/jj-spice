@@ -72,6 +72,14 @@ pub struct SyncArgs {
     /// Re-discover change requests even for bookmarks that are already tracked.
     #[arg(long)]
     pub force: bool,
+    /// Allow inactive (merged and closed) change requests to be tracked.
+    ///
+    /// Allow tracking closed and merged change requests when fetching them
+    /// from remote.
+    ///
+    /// By default, jj-spice will only track change requests that are open, or in draft.
+    #[arg(long, default_value_t = false)]
+    pub allow_inactive: bool,
 }
 
 /// Arguments for the `util` subcommand group.

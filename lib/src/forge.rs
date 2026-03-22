@@ -30,6 +30,12 @@ pub enum ChangeStatus {
     Merged,
 }
 
+impl ChangeStatus {
+    pub fn is_inactive(&self) -> bool {
+        matches!(self, ChangeStatus::Closed | ChangeStatus::Merged)
+    }
+}
+
 /// A change request on a forge.
 ///
 /// Each forge backend implements this on its own type that combines persisted
@@ -172,17 +178,16 @@ pub trait Forge: Send + Sync {
     ///
     /// This is a convenience wrapper around [`Forge::find`] that extracts
     /// [`ForgeMeta`] from each result.
-    ///
     /// `source_repo` is forwarded to [`Forge::find`] unchanged; see its
     /// documentation for the forge-specific format.
     fn find_change_requests<'a>(
         &'a self,
         source_branch: &'a str,
         source_repo: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<Vec<ForgeMeta>, Box<dyn std::error::Error>>> {
+    ) -> BoxFuture<'a, ForgeResults> {
         Box::pin(async move {
             let crs = self.find(Some(source_branch), None, source_repo).await?;
-            Ok(crs.iter().map(|cr| cr.to_forge_meta()).collect())
+            Ok(crs)
         })
     }
 }

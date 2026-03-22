@@ -11,11 +11,10 @@ pub mod stack_submit;
 /// `stack sync` command implementation.
 pub mod stack_sync;
 
-use jj_cli::cli_util::RevisionArg;
-use jj_lib::repo::Repo as _;
-
 use cli::{Cli, SpiceCommand, StackCommand, UtilCommand};
 use env::SpiceEnv;
+use jj_cli::cli_util::RevisionArg;
+use jj_lib::repo::Repo as _;
 use jj_spice_lib::forge::detect::detect_forges;
 
 /// Dispatch to the appropriate command.
@@ -83,7 +82,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     let head = env
                         .resolve_single_rev(&RevisionArg::AT)
                         .map_err(|e| format!("failed to resolve @: {e}"))?;
-                    rt.block_on(stack_sync::run(&env, &trunk, &head, sync_args.force))
+                    rt.block_on(stack_sync::run(&sync_args, &env, &trunk, &head))
                 }
             }
         }

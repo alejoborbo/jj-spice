@@ -12,8 +12,8 @@ use jj_spice_lib::bookmark::graph::BookmarkGraph;
 use jj_spice_lib::comments::Comment;
 use jj_spice_lib::forge::{CreateParams, Forge};
 use jj_spice_lib::protos::change_request::{ChangeRequests, ForgeMeta};
-use jj_spice_lib::store::SpiceStore;
 use jj_spice_lib::store::change_request::ChangeRequestStore;
+use jj_spice_lib::store::SpiceStore;
 
 use crate::commands::env::SpiceEnv;
 
@@ -240,7 +240,12 @@ async fn get_existing_change_request(
     }
 
     // Query the forge.
-    let metas = forge.find_change_requests(bookmark, source_repo).await?;
+    let metas = forge
+        .find_change_requests(bookmark, source_repo)
+        .await?
+        .iter()
+        .map(|cr| cr.to_forge_meta())
+        .collect::<Vec<_>>();
 
     match metas.len() {
         0 => Ok(None),
@@ -251,6 +256,7 @@ async fn get_existing_change_request(
                 "{bookmark}: found {} change requests on the forge",
                 metas.len()
             )?;
+
             for (i, meta) in metas.iter().enumerate() {
                 writeln!(ui.stdout_formatter(), "  {i}: {meta}")?;
             }

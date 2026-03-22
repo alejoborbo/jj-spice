@@ -5,8 +5,6 @@ use jj_cli::ui::Ui;
 use jj_lib::backend::CommitId;
 use jj_lib::config::{ConfigFile, ConfigSource};
 use jj_lib::repo::Repo;
-
-use crate::commands::env::{SpiceEnv, cmd_err};
 use jj_spice_lib::bookmark::Bookmark;
 use jj_spice_lib::bookmark::graph::{BookmarkGraph, BookmarkNode};
 use jj_spice_lib::forge::Forge;
@@ -16,6 +14,9 @@ use jj_spice_lib::forge::detect::{
 use jj_spice_lib::protos::change_request::ForgeMeta;
 use jj_spice_lib::store::SpiceStore;
 use jj_spice_lib::store::change_request::ChangeRequestStore;
+
+use crate::commands::cli::SyncArgs;
+use crate::commands::env::{SpiceEnv, cmd_err};
 
 /// Per-bookmark error (non-fatal, printed as a warning).
 #[derive(Debug, thiserror::Error)]
@@ -40,10 +41,10 @@ enum BookmarkSyncError {
 /// the user is prompted (once per unique hostname) to select a forge type.
 /// The choice is persisted to the jj repo config so future runs skip the prompt.
 pub async fn run(
+    args: &SyncArgs,
     env: &SpiceEnv,
     trunk: &CommitId,
     head: &CommitId,
-    force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let graph = BookmarkGraph::new(env.repo.as_ref(), trunk, head)?;
     let DetectionResult {
@@ -65,7 +66,7 @@ pub async fn run(
         let name = node.name();
 
         // Skip bookmarks that already have a tracked CR (unless --force).
-        if !force && state.get(name).is_some() {
+        if !args.force && state.get(name).is_some() {
             writeln!(
                 env.ui.warning_default(),
                 "{name}: already tracked, skipping (use --force to re-sync)"
@@ -73,7 +74,7 @@ pub async fn run(
             continue;
         }
 
-        match sync_bookmark(&env.ui, bookmark, &forges).await {
+        match sync_bookmark(&env.ui, bookmark, &forges, args.allow_inactive).await {
             Ok(Some(meta)) => {
                 state.set(name.to_string(), meta);
                 writeln!(env.ui.status(), "{name}: tracked")?;
@@ -210,6 +211,7 @@ async fn sync_bookmark(
     ui: &Ui,
     bookmark: &Bookmark<'_>,
     forge_map: &HashMap<String, Box<dyn Forge>>,
+    allow_inactive: bool,
 ) -> Result<Option<ForgeMeta>, BookmarkSyncError> {
     let tracked_remotes: Vec<&str> = bookmark.tracked_remotes().collect();
     if tracked_remotes.is_empty() {
@@ -238,9 +240,20 @@ async fn sync_bookmark(
         queried_repos.insert(repo_id.clone());
         tracked_repo_ids.push(repo_id);
 
-        let crs = forge_instance
+        let crs: Vec<_> = forge_instance
             .find_change_requests(bookmark.name(), None)
-            .await?;
+            .await?
+            .iter()
+            .filter_map(|cr| {
+                // If --allow-inactive is not set, we remote change request being
+                // closed or merged.
+                if !allow_inactive && cr.as_ref().status().is_inactive() {
+                    return None;
+                }
+                Some(cr.to_forge_meta())
+            })
+            .collect();
+
         all_crs.extend(crs);
     }
 
@@ -296,9 +309,8 @@ async fn sync_bookmark(
 
 #[cfg(test)]
 mod tests {
-    use jj_spice_lib::protos::change_request::{
-        ForgeMeta, GitHubMeta, forge_meta::Forge as ForgeOneof,
-    };
+    use jj_spice_lib::protos::change_request::forge_meta::Forge as ForgeOneof;
+    use jj_spice_lib::protos::change_request::{ForgeMeta, GitHubMeta};
 
     #[test]
     fn forge_meta_display_github_variant() {
