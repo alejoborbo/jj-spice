@@ -53,16 +53,6 @@ nfpms:
       - archlinux
     bindir: /usr/bin
 
-# Homebrew cask pushed to alejoborbo/homebrew-tap.
-homebrew_casks:
-  - name: jj-spice
-    homepage: https://github.com/alejoborbo/jj-spice
-    description: "Stacked change requests for Jujutsu VCS"
-    repository:
-      owner: alejoborbo
-      name: homebrew-tap
-      token: "{{ .Env.GH_PAT }}"
-
 # Scoop manifest pushed to alejoborbo/scoop-bucket.
 scoops:
   - name: jj-spice
