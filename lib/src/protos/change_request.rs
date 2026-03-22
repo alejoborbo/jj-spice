@@ -44,4 +44,7 @@ pub struct GitHubMeta {
     /// GraphQL node ID, for future mutation use
     #[prost(string, tag = "6")]
     pub graphql_id: ::prost::alloc::string::String,
+    /// comment ID, for updating the stack trace in the Pull Request
+    #[prost(uint64, optional, tag = "7")]
+    pub comment_id: ::core::option::Option<u64>,
 }

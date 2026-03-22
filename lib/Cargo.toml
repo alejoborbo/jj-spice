@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+const_format = "0.2.35"
 gix = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }

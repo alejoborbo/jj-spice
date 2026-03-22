@@ -1,8 +1,8 @@
 use std::fmt;
 
-use crate::protos::change_request::{ChangeRequests, ForgeMeta, forge_meta::Forge as ForgeOneof};
-
 use super::{SpiceStore, SpiceStoreError};
+use crate::protos::change_request::forge_meta::Forge as ForgeOneof;
+use crate::protos::change_request::{ChangeRequests, ForgeMeta};
 
 const FILENAME: &str = "change_requests.pb";
 
@@ -12,6 +12,30 @@ impl ForgeMeta {
         match &self.forge {
             Some(ForgeOneof::Github(gh)) => Some(&gh.target_branch),
             None => None,
+        }
+    }
+
+    /// Return the source (head) branch stored in the forge-specific metadata.
+    pub fn source_branch(&self) -> Option<&str> {
+        match &self.forge {
+            Some(ForgeOneof::Github(gh)) => Some(&gh.source_branch),
+            None => None,
+        }
+    }
+
+    /// Return the comment ID stored in the forge-specific metadata, if any.
+    pub fn comment_id(&self) -> Option<u64> {
+        match &self.forge {
+            Some(ForgeOneof::Github(gh)) => gh.comment_id,
+            None => None,
+        }
+    }
+
+    /// Set the comment ID in the forge-specific metadata.
+    pub fn set_comment_id(&mut self, id: u64) {
+        match &mut self.forge {
+            Some(ForgeOneof::Github(gh)) => gh.comment_id = Some(id),
+            None => {}
         }
     }
 }
@@ -77,9 +101,11 @@ impl<'a> ChangeRequestStore<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::protos::change_request::{GitHubMeta, forge_meta::Forge as ForgeOneof};
     use tempfile::TempDir;
+
+    use super::*;
+    use crate::protos::change_request::GitHubMeta;
+    use crate::protos::change_request::forge_meta::Forge as ForgeOneof;
 
     /// Build a sample [`ForgeMeta`] for testing.
     fn sample_meta(number: u64) -> ForgeMeta {
@@ -91,6 +117,7 @@ mod tests {
                 source_repo: "owner/repo".into(),
                 target_repo: "owner/repo".into(),
                 graphql_id: String::new(),
+                comment_id: None,
             })),
         }
     }
@@ -159,5 +186,38 @@ mod tests {
         let reloaded = cr_store.load().unwrap();
         assert_eq!(state, reloaded);
         assert_eq!(reloaded.by_bookmark.len(), 2);
+    }
+
+    #[test]
+    fn set_comment_id_updates_github_variant() {
+        let mut meta = sample_meta(1);
+        assert_eq!(meta.comment_id(), None);
+
+        meta.set_comment_id(12345);
+        assert_eq!(meta.comment_id(), Some(12345));
+    }
+
+    #[test]
+    fn set_comment_id_noop_for_none_forge() {
+        let mut meta = ForgeMeta { forge: None };
+        meta.set_comment_id(999);
+        assert_eq!(meta.comment_id(), None);
+    }
+
+    #[test]
+    fn comment_id_round_trips_through_store() {
+        let (_tmp, spice) = temp_cr_store();
+        let cr_store = ChangeRequestStore::new(&spice);
+
+        let mut meta = sample_meta(42);
+        meta.set_comment_id(7890);
+
+        let mut state = cr_store.load().unwrap();
+        state.set("branch-with-comment".into(), meta);
+        cr_store.save(&state).unwrap();
+
+        let reloaded = cr_store.load().unwrap();
+        let got = reloaded.get("branch-with-comment").unwrap();
+        assert_eq!(got.comment_id(), Some(7890));
     }
 }

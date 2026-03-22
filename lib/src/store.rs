@@ -113,6 +113,7 @@ mod tests {
                     source_repo: "owner/repo".into(),
                     target_repo: "owner/repo".into(),
                     graphql_id: "PR_abc".into(),
+                    comment_id: None,
                 })),
             },
         );

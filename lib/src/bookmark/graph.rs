@@ -24,6 +24,7 @@ use super::Bookmark;
 type BookmarkGraphParts<'a> = (
     BTreeMap<String, BookmarkNode<'a>>,
     BTreeMap<String, Vec<GraphEdge<String>>>,
+    BTreeMap<String, Vec<GraphEdge<String>>>,
 );
 
 /// A node in the bookmark DAG, wrapping a [`Bookmark`] with ancestry info.
@@ -87,12 +88,14 @@ pub enum BookmarkGraphError {
 pub struct BookmarkGraph<'a> {
     nodes: BTreeMap<String, BookmarkNode<'a>>,
     edges: BTreeMap<String, Vec<GraphEdge<String>>>,
+    descendants: BTreeMap<String, Vec<GraphEdge<String>>>,
     /// Head bookmarks sorted lexicographically for deterministic iteration.
     ///
     /// This ordering feeds into [`Self::iter_graph`] via `topo_order_forward`,
     /// which uses a DFS with no tie-breaking. A stable starting order ensures
     /// the graph layout is identical across runs.
-    head_bookmarks: Vec<String>,
+    pub(crate) head_bookmarks: Vec<String>,
+    pub(crate) root_bookmarks: Vec<String>,
 }
 
 impl<'a> BookmarkGraph<'a> {
@@ -130,6 +133,8 @@ impl<'a> BookmarkGraph<'a> {
                 nodes: BTreeMap::new(),
                 edges: BTreeMap::new(),
                 head_bookmarks: Vec::new(),
+                root_bookmarks: Vec::new(),
+                descendants: BTreeMap::new(),
             });
         }
         let heads_expr = RevsetExpression::commits(commit_ids);
@@ -149,12 +154,16 @@ impl<'a> BookmarkGraph<'a> {
         let revset = expression.evaluate(repo)?;
         let reversed =
             reverse_graph(revset.iter_graph(), |id| id).expect("commit graph should be acyclic");
-        let (nodes, edges) = Self::build_bookmark_graph(&reversed, &bookmarks_per_commit);
+        let (nodes, edges, descendants) =
+            Self::build_bookmark_graph(&reversed, &bookmarks_per_commit);
         let head_bookmarks = Self::find_head_bookmarks(&edges);
+        let root_bookmarks = Self::find_root_bookmarks(&nodes);
         Ok(Self {
             nodes,
             edges,
+            descendants,
             head_bookmarks,
+            root_bookmarks,
         })
     }
 
@@ -162,6 +171,12 @@ impl<'a> BookmarkGraph<'a> {
     /// the name is not in the graph.
     pub fn edges_for(&self, name: &str) -> Vec<GraphEdge<String>> {
         self.edges.get(name).cloned().unwrap_or_default()
+    }
+
+    /// Return the descendants (parent → child) for a bookmark, or an empty vec if
+    /// the name is not in the graph.
+    pub fn descendants_for(&self, name: &str) -> Vec<GraphEdge<String>> {
+        self.descendants.get(name).cloned().unwrap_or_default()
     }
 
     /// Iterate bookmarks in topological order (roots first).
@@ -190,12 +205,16 @@ impl<'a> BookmarkGraph<'a> {
     ) -> Result<Self, BookmarkGraphError> {
         let bookmarks_per_commit = Self::build_bookmark_commit_map(repo);
         let reversed = Self::evaluate_branch_commits(repo, trunk, heads)?;
-        let (nodes, edges) = Self::build_bookmark_graph(&reversed, &bookmarks_per_commit);
+        let (nodes, edges, descendants) =
+            Self::build_bookmark_graph(&reversed, &bookmarks_per_commit);
         let head_bookmarks = Self::find_head_bookmarks(&edges);
+        let root_bookmarks = Self::find_root_bookmarks(&nodes);
         Ok(Self {
             nodes,
             edges,
+            descendants,
             head_bookmarks,
+            root_bookmarks,
         })
     }
 
@@ -259,6 +278,7 @@ impl<'a> BookmarkGraph<'a> {
 
         let mut nodes: BTreeMap<String, BookmarkNode> = BTreeMap::new();
         let mut edges: BTreeMap<String, Vec<GraphEdge<String>>> = BTreeMap::new();
+        let mut descendants: BTreeMap<String, Vec<GraphEdge<String>>> = BTreeMap::new();
         let mut visited: HashSet<&CommitId> = HashSet::new();
 
         let mut stack: Vec<(&CommitId, Option<&str>)> =
@@ -295,6 +315,10 @@ impl<'a> BookmarkGraph<'a> {
                         && !edge_list.iter().any(|e| e.target == pn)
                     {
                         edge_list.push(GraphEdge::direct(pn.to_string()));
+                        descendants
+                            .entry(pn.to_string())
+                            .or_default()
+                            .push(GraphEdge::direct(name.clone()));
                     }
                 }
             }
@@ -322,7 +346,7 @@ impl<'a> BookmarkGraph<'a> {
             }
         }
 
-        (nodes, edges)
+        (nodes, edges, descendants)
     }
 
     /// Collect head bookmarks (those not targeted by any edge) into a sorted
@@ -343,6 +367,34 @@ impl<'a> BookmarkGraph<'a> {
         // clarity and defense-in-depth.
         heads.sort();
         heads
+    }
+
+    // Collect root bookmarks (those with no ascendants) into a sorted
+    // [`Vec`] for deterministic iteration.
+    fn find_root_bookmarks(nodes: &BTreeMap<String, BookmarkNode>) -> Vec<String> {
+        nodes
+            .iter()
+            .filter(|(_, node)| node.ascendants().is_empty())
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+}
+
+#[cfg(test)]
+impl<'a> BookmarkGraph<'a> {
+    /// Build a minimal graph for unit-testing code that reads
+    /// `root_bookmarks` and `descendants_for()` (e.g. `Comment::to_string`).
+    pub(crate) fn for_testing(
+        root_bookmarks: Vec<String>,
+        descendants: BTreeMap<String, Vec<GraphEdge<String>>>,
+    ) -> Self {
+        Self {
+            nodes: BTreeMap::new(),
+            edges: BTreeMap::new(),
+            descendants,
+            head_bookmarks: Vec::new(),
+            root_bookmarks,
+        }
     }
 }
 
@@ -520,7 +572,8 @@ mod tests {
             (c.clone(), vec!["feat-c"]),
         ]);
 
-        let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+        let (nodes, edges, descendants) =
+            BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
 
         assert_eq!(nodes.len(), 2);
         assert!(nodes.contains_key("feat-a"));
@@ -533,6 +586,14 @@ mod tests {
         // feat-c should have an edge to feat-a
         let feat_c_targets: Vec<&str> = edges["feat-c"].iter().map(|e| e.target.as_str()).collect();
         assert!(feat_c_targets.contains(&"feat-a"));
+
+        // descendants: feat-a should have feat-c as descendant
+        let feat_a_desc: Vec<&str> = descendants["feat-a"]
+            .iter()
+            .map(|e| e.target.as_str())
+            .collect();
+        assert_eq!(feat_a_desc, vec!["feat-c"]);
+        assert!(!descendants.contains_key("feat-c"));
     }
 
     #[test]
@@ -554,7 +615,8 @@ mod tests {
             (c.clone(), vec!["base"]),
         ]);
 
-        let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+        let (nodes, edges, descendants) =
+            BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
 
         assert_eq!(nodes.len(), 3);
         // top -> mid -> base
@@ -566,6 +628,19 @@ mod tests {
 
         let base_targets: Vec<&str> = edges["base"].iter().map(|e| e.target.as_str()).collect();
         assert!(base_targets.contains(&"mid"));
+
+        // descendants: top -> mid -> base
+        let top_desc: Vec<&str> = descendants["top"]
+            .iter()
+            .map(|e| e.target.as_str())
+            .collect();
+        assert_eq!(top_desc, vec!["mid"]);
+        let mid_desc: Vec<&str> = descendants["mid"]
+            .iter()
+            .map(|e| e.target.as_str())
+            .collect();
+        assert_eq!(mid_desc, vec!["base"]);
+        assert!(!descendants.contains_key("base"));
     }
 
     #[test]
@@ -597,7 +672,8 @@ mod tests {
             (d.clone(), vec!["base"]),
         ]);
 
-        let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+        let (nodes, edges, descendants) =
+            BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
 
         assert_eq!(nodes.len(), 4);
 
@@ -616,6 +692,25 @@ mod tests {
             edges["base"].iter().map(|e| e.target.as_str()).collect();
         assert!(base_edge_targets.contains("left"));
         assert!(base_edge_targets.contains("right"));
+
+        // descendants: top -> {left, right}, left -> base, right -> base
+        let top_desc: HashSet<&str> = descendants["top"]
+            .iter()
+            .map(|e| e.target.as_str())
+            .collect();
+        assert!(top_desc.contains("left"));
+        assert!(top_desc.contains("right"));
+        let left_desc: Vec<&str> = descendants["left"]
+            .iter()
+            .map(|e| e.target.as_str())
+            .collect();
+        assert_eq!(left_desc, vec!["base"]);
+        let right_desc: Vec<&str> = descendants["right"]
+            .iter()
+            .map(|e| e.target.as_str())
+            .collect();
+        assert_eq!(right_desc, vec!["base"]);
+        assert!(!descendants.contains_key("base"));
     }
 
     #[test]
@@ -626,11 +721,13 @@ mod tests {
 
         let bookmarks = bookmark_map(vec![(a.clone(), vec!["only"])]);
 
-        let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+        let (nodes, edges, descendants) =
+            BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
 
         assert_eq!(nodes.len(), 1);
         assert!(nodes["only"].ascendants().is_empty());
         assert!(edges["only"].is_empty());
+        assert!(descendants.is_empty());
     }
 
     #[test]
@@ -639,9 +736,11 @@ mod tests {
         let reversed: Vec<GraphNode<CommitId>> = vec![(a.clone(), vec![])];
         let bookmarks = HashMap::new();
 
-        let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+        let (nodes, edges, descendants) =
+            BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
         assert!(nodes.is_empty());
         assert!(edges.is_empty());
+        assert!(descendants.is_empty());
     }
 
     #[test]
@@ -662,7 +761,8 @@ mod tests {
 
         let bookmarks = bookmark_map(vec![(a.clone(), vec!["head"]), (d.clone(), vec!["base"])]);
 
-        let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+        let (nodes, edges, descendants) =
+            BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
 
         assert_eq!(nodes.len(), 2);
         assert!(nodes["head"].ascendants().is_empty());
@@ -671,6 +771,14 @@ mod tests {
         let base_targets: Vec<&str> = edges["base"].iter().map(|e| e.target.as_str()).collect();
         assert_eq!(base_targets, vec!["head"]);
         assert!(edges["head"].is_empty());
+
+        // descendants: head -> base
+        let head_desc: Vec<&str> = descendants["head"]
+            .iter()
+            .map(|e| e.target.as_str())
+            .collect();
+        assert_eq!(head_desc, vec!["base"]);
+        assert!(!descendants.contains_key("base"));
     }
 
     #[test]
@@ -697,7 +805,8 @@ mod tests {
             (c.clone(), vec!["right"]),
         ]);
 
-        let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+        let (nodes, edges, descendants) =
+            BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
 
         assert_eq!(nodes.len(), 3);
 
@@ -711,6 +820,16 @@ mod tests {
 
         let right_targets: Vec<&str> = edges["right"].iter().map(|e| e.target.as_str()).collect();
         assert_eq!(right_targets, vec!["root"]);
+
+        // descendants: root -> {left, right}
+        let root_desc: HashSet<&str> = descendants["root"]
+            .iter()
+            .map(|e| e.target.as_str())
+            .collect();
+        assert!(root_desc.contains("left"));
+        assert!(root_desc.contains("right"));
+        assert!(!descendants.contains_key("left"));
+        assert!(!descendants.contains_key("right"));
     }
 
     #[test]
@@ -736,7 +855,8 @@ mod tests {
             (c.clone(), vec!["base"]),
         ]);
 
-        let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+        let (nodes, edges, descendants) =
+            BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
 
         // base is reachable from top (directly) and from mid.
         // ascendants should contain both "top" and "mid", each once.
@@ -751,6 +871,20 @@ mod tests {
         assert_eq!(base_edge_targets.len(), 2);
         assert!(base_edge_targets.contains("top"));
         assert!(base_edge_targets.contains("mid"));
+
+        // descendants: top -> {mid, base}, mid -> base
+        let top_desc: HashSet<&str> = descendants["top"]
+            .iter()
+            .map(|e| e.target.as_str())
+            .collect();
+        assert!(top_desc.contains("mid"));
+        assert!(top_desc.contains("base"));
+        let mid_desc: Vec<&str> = descendants["mid"]
+            .iter()
+            .map(|e| e.target.as_str())
+            .collect();
+        assert_eq!(mid_desc, vec!["base"]);
+        assert!(!descendants.contains_key("base"));
     }
 
     #[test]
@@ -770,7 +904,8 @@ mod tests {
             (b.clone(), vec!["base"]),
         ]);
 
-        let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+        let (nodes, edges, descendants) =
+            BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
 
         assert_eq!(nodes.len(), 3);
         assert!(nodes.contains_key("feat-1"));
@@ -796,6 +931,19 @@ mod tests {
         // feat-1 and feat-2 should have no ascendants (they are heads)
         assert!(nodes["feat-1"].ascendants().is_empty());
         assert!(nodes["feat-2"].ascendants().is_empty());
+
+        // descendants: feat-1 -> base, feat-2 -> base
+        let feat1_desc: Vec<&str> = descendants["feat-1"]
+            .iter()
+            .map(|e| e.target.as_str())
+            .collect();
+        assert_eq!(feat1_desc, vec!["base"]);
+        let feat2_desc: Vec<&str> = descendants["feat-2"]
+            .iter()
+            .map(|e| e.target.as_str())
+            .collect();
+        assert_eq!(feat2_desc, vec!["base"]);
+        assert!(!descendants.contains_key("base"));
     }
 
     #[test]
@@ -830,7 +978,8 @@ mod tests {
             (d.clone(), vec!["feat-d"]),
         ]);
 
-        let (nodes, edges) = BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+        let (nodes, edges, descendants) =
+            BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
 
         // All four bookmarks across both stacks must be present.
         assert_eq!(
@@ -855,5 +1004,19 @@ mod tests {
         // The two stacks are independent — no cross-edges.
         assert!(edges["feat-a"].is_empty());
         assert!(edges["feat-c"].is_empty());
+
+        // descendants: feat-a -> feat-b, feat-c -> feat-d, no cross-stack descendants
+        let a_desc: Vec<&str> = descendants["feat-a"]
+            .iter()
+            .map(|e| e.target.as_str())
+            .collect();
+        assert_eq!(a_desc, vec!["feat-b"]);
+        let c_desc: Vec<&str> = descendants["feat-c"]
+            .iter()
+            .map(|e| e.target.as_str())
+            .collect();
+        assert_eq!(c_desc, vec!["feat-d"]);
+        assert!(!descendants.contains_key("feat-b"));
+        assert!(!descendants.contains_key("feat-d"));
     }
 }

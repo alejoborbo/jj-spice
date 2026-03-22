@@ -1,5 +1,6 @@
 use std::io::Write as _;
 
+use itertools::Itertools;
 use jj_cli::description_util::TextEditor;
 use jj_cli::git_util::{GitSubprocessUi, print_push_stats};
 use jj_lib::backend::CommitId;
@@ -7,13 +8,14 @@ use jj_lib::git::{self, GitBranchPushTargets};
 use jj_lib::ref_name::{RefNameBuf, RemoteNameBuf};
 use jj_lib::refs::{BookmarkPushAction, BookmarkPushUpdate, classify_bookmark_push_action};
 use jj_spice_lib::bookmark::Bookmark;
-
-use crate::commands::env::SpiceEnv;
 use jj_spice_lib::bookmark::graph::BookmarkGraph;
+use jj_spice_lib::comments::Comment;
 use jj_spice_lib::forge::{CreateParams, Forge};
 use jj_spice_lib::protos::change_request::{ChangeRequests, ForgeMeta};
 use jj_spice_lib::store::SpiceStore;
 use jj_spice_lib::store::change_request::ChangeRequestStore;
+
+use crate::commands::env::SpiceEnv;
 
 /// Create change requests for each bookmark in the current stack (trunk..@).
 pub async fn run(
@@ -26,11 +28,11 @@ pub async fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cr_store = ChangeRequestStore::new(store);
     let graph = BookmarkGraph::new(env.repo.as_ref(), trunk, head)?;
-    let iter_graph = graph.iter_graph()?;
     let text_editor = TextEditor::from_settings(&env.settings)?;
     let mut state = cr_store.load()?;
 
-    for bookmark_node in iter_graph {
+    // Iter on the graphs to create the change requests.
+    for bookmark_node in graph.iter_graph()? {
         let bookmark = bookmark_node.bookmark();
         let ascendants = bookmark_node.ascendants();
 
@@ -116,6 +118,38 @@ pub async fn run(
     }
 
     // Save the CRs to the store.
+    cr_store.save(&state)?;
+
+    // Once the change requests have been created, update the PR comments to add the stack trace.
+    // Fetch all change request for all bookmark presents in the graph.
+    let metas_per_bookmark: Vec<(&Bookmark, ForgeMeta)> = graph
+        .iter_graph()
+        .unwrap()
+        .unique_by(|n| n.bookmark().name())
+        .map(|n| {
+            (
+                n.bookmark(),
+                state.get(n.bookmark().name()).unwrap().clone(),
+            )
+        })
+        .collect();
+
+    for (bookmark, meta) in metas_per_bookmark {
+        let comment = Comment::new(bookmark, &graph, &state)
+            .to_string()
+            .expect("Failed to serialize comment");
+
+        let comment_id = forge
+            .update_or_create_comment(&meta, comment.as_str())
+            .await?;
+
+        // Update the forge metadata with the comment id.
+        let mut updated_meta = state.get(bookmark.name()).unwrap().clone();
+        updated_meta.set_comment_id(comment_id);
+        state.set(bookmark.name().to_string(), updated_meta);
+    }
+
+    // Persist the updated comment IDs to disk.
     cr_store.save(&state)?;
 
     Ok(())

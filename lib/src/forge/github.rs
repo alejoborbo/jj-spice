@@ -3,8 +3,8 @@ use std::process::Command;
 
 use http_body_util::BodyExt;
 use octocrab::Octocrab;
-use octocrab::models::IssueState;
 use octocrab::models::pulls::PullRequest;
+use octocrab::models::{CommentId, IssueState};
 use url::Url;
 
 use crate::forge::{
@@ -185,6 +185,7 @@ fn graphql_pr_to_cr(pr: &GraphQlPullRequest, host: &str) -> GitHubChangeRequest 
             .map(|r| r.name_with_owner.clone())
             .unwrap_or_default(),
         graphql_id: String::new(),
+        comment_id: None,
     };
 
     GitHubChangeRequest {
@@ -343,6 +344,7 @@ fn github_cr_from_pr(pr: &PullRequest, host: &str) -> GitHubChangeRequest {
             .and_then(|r| r.full_name.clone())
             .unwrap_or_default(),
         graphql_id: String::new(),
+        comment_id: None,
     };
 
     GitHubChangeRequest {
@@ -459,6 +461,33 @@ impl Forge for GitHubForge {
                 .await
                 .map_err(GitHubError::Api)?;
             Ok(Box::new(github_cr_from_pr(&pr, &self.host)) as Box<dyn ChangeRequest>)
+        })
+    }
+
+    fn update_or_create_comment<'a>(
+        &'a self,
+        meta: &'a ForgeMeta,
+        comment: &'a str,
+    ) -> BoxFuture<'a, Result<u64, Box<dyn std::error::Error>>> {
+        Box::pin(async move {
+            let gh = Self::extract_meta(meta)?;
+            let issues_handler = self.client.issues(&self.owner, &self.repo);
+
+            // If a comment ID is present, update the comment.
+            if let Some(comment_id) = gh.comment_id {
+                issues_handler
+                    .update_comment(CommentId(comment_id), comment)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                return Ok(comment_id);
+            }
+
+            // Otherwise, create a new comment.
+            let pr_comment = issues_handler
+                .create_comment(gh.number, comment)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(pr_comment.id.0)
         })
     }
 
@@ -622,6 +651,7 @@ mod tests {
                 source_repo: "owner/repo".into(),
                 target_repo: "owner/repo".into(),
                 graphql_id: "PR_abc123".into(),
+                comment_id: None,
             },
             host: "github.com".into(),
             title: "Add feature X".into(),
@@ -700,6 +730,7 @@ mod tests {
                 source_repo: String::new(),
                 target_repo: String::new(),
                 graphql_id: String::new(),
+                comment_id: None,
             })),
         };
 
@@ -782,6 +813,7 @@ mod tests {
                 source_repo: format!("{OWNER}/{REPO}"),
                 target_repo: format!("{OWNER}/{REPO}"),
                 graphql_id: String::new(),
+                comment_id: None,
             })),
         }
     }
@@ -1189,6 +1221,121 @@ mod tests {
             err_msg.contains("500"),
             "error should mention 500: {err_msg}"
         );
+    }
+
+    // -- update_or_create_comment tests --
+
+    fn github_meta_with_comment(number: u64, comment_id: Option<u64>) -> ForgeMeta {
+        ForgeMeta {
+            forge: Some(ForgeOneof::Github(GitHubMeta {
+                number,
+                source_branch: "feature-branch".into(),
+                target_branch: "main".into(),
+                source_repo: format!("{OWNER}/{REPO}"),
+                target_repo: format!("{OWNER}/{REPO}"),
+                graphql_id: String::new(),
+                comment_id,
+            })),
+        }
+    }
+
+    /// Minimal GitHub issue-comment JSON matching octocrab's `Comment` struct.
+    fn comment_json(id: u64) -> serde_json::Value {
+        json!({
+            "id": id,
+            "node_id": format!("IC_{id}"),
+            "url": format!("https://api.github.com/repos/{OWNER}/{REPO}/issues/comments/{id}"),
+            "html_url": format!("https://github.com/{OWNER}/{REPO}/issues/42#issuecomment-{id}"),
+            "body": "stack trace",
+            "author_association": "MEMBER",
+            "user": {
+                "login": "bot",
+                "id": 1,
+                "node_id": "U_bot",
+                "avatar_url": "https://example.com/avatar",
+                "gravatar_id": "",
+                "url": "https://api.github.com/users/bot",
+                "html_url": "https://github.com/bot",
+                "followers_url": "https://api.github.com/users/bot/followers",
+                "following_url": "https://api.github.com/users/bot/following{/other_user}",
+                "gists_url": "https://api.github.com/users/bot/gists{/gist_id}",
+                "starred_url": "https://api.github.com/users/bot/starred{/owner}{/repo}",
+                "subscriptions_url": "https://api.github.com/users/bot/subscriptions",
+                "organizations_url": "https://api.github.com/users/bot/orgs",
+                "repos_url": "https://api.github.com/users/bot/repos",
+                "events_url": "https://api.github.com/users/bot/events{/privacy}",
+                "received_events_url": "https://api.github.com/users/bot/received_events",
+                "type": "User",
+                "site_admin": false
+            },
+            "created_at": "2025-01-01T00:00:00Z"
+        })
+    }
+
+    #[tokio::test]
+    async fn create_comment_when_no_comment_id() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/issues/42/comments")))
+            .respond_with(ResponseTemplate::new(201).set_body_json(comment_json(555)))
+            .mount(&mock_server)
+            .await;
+
+        let forge = mock_forge(&mock_server.uri());
+        let meta = github_meta_with_comment(42, None);
+        let id = forge
+            .update_or_create_comment(&meta, "stack trace")
+            .await
+            .unwrap();
+
+        assert_eq!(id, 555);
+    }
+
+    #[tokio::test]
+    async fn update_comment_when_comment_id_present() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/issues/comments/999")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(comment_json(999)))
+            .mount(&mock_server)
+            .await;
+
+        let forge = mock_forge(&mock_server.uri());
+        let meta = github_meta_with_comment(42, Some(999));
+        let id = forge
+            .update_or_create_comment(&meta, "updated stack trace")
+            .await
+            .unwrap();
+
+        assert_eq!(id, 999);
+    }
+
+    #[tokio::test]
+    async fn update_or_create_comment_rejects_wrong_forge() {
+        let mock_server = MockServer::start().await;
+        let forge = mock_forge(&mock_server.uri());
+        let meta = ForgeMeta { forge: None };
+
+        let result = forge.update_or_create_comment(&meta, "body").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn create_comment_propagates_api_error() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/issues/42/comments")))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "message": "Not Found",
+                "documentation_url": "https://docs.github.com/rest"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let forge = mock_forge(&mock_server.uri());
+        let meta = github_meta_with_comment(42, None);
+        let result = forge.update_or_create_comment(&meta, "body").await;
+        assert!(result.is_err());
     }
 
     #[test]

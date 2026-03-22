@@ -28,4 +28,5 @@ message GitHubMeta {
   string source_repo = 4;     // fork origin (e.g. "user/repo"), empty for same-repo
   string target_repo = 5;     // target repo (e.g. "owner/repo"), empty for same-repo
   string graphql_id = 6;      // GraphQL node ID, for future mutation use
+  optional uint64 comment_id = 7;      // comment ID, for updating the stack trace in the Pull Request
 }

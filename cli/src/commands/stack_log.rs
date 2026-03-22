@@ -476,6 +476,7 @@ mod tests {
                 source_repo: String::new(),
                 target_repo: String::new(),
                 graphql_id: String::new(),
+                comment_id: None,
             })),
         };
         assert_eq!(format_meta_id(&meta), "42");
@@ -570,6 +571,7 @@ mod tests {
                     source_repo: String::new(),
                     target_repo: String::new(),
                     graphql_id: String::new(),
+                    comment_id: None,
                 })),
             },
         );
@@ -584,6 +586,7 @@ mod tests {
                     source_repo: "owner/repo".into(),
                     target_repo: "owner/repo".into(),
                     graphql_id: String::new(),
+                    comment_id: None,
                 },
                 host: "github.com".into(),
                 title: "Add cool feature".into(),
@@ -620,6 +623,7 @@ mod tests {
                     source_repo: String::new(),
                     target_repo: String::new(),
                     graphql_id: String::new(),
+                    comment_id: None,
                 })),
             },
         );
@@ -634,6 +638,7 @@ mod tests {
                     source_repo: "o/r".into(),
                     target_repo: "o/r".into(),
                     graphql_id: String::new(),
+                    comment_id: None,
                 },
                 host: "github.com".into(),
                 title: "WIP thing".into(),
@@ -664,6 +669,7 @@ mod tests {
                     source_repo: String::new(),
                     target_repo: String::new(),
                     graphql_id: String::new(),
+                    comment_id: None,
                 })),
             },
         );

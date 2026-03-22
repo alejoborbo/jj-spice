@@ -278,6 +278,7 @@ mod tests {
                 source_repo: String::new(),
                 target_repo: String::new(),
                 graphql_id: String::new(),
+                comment_id: None,
             })),
         };
         assert_eq!(meta.to_string(), "GitHub PR #42 (feat → main)");
