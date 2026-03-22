@@ -23,4 +23,5 @@ jj-lib = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 itertools.workspace = true
+futures = "0.3.32"
 
