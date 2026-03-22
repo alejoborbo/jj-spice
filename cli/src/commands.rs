@@ -56,11 +56,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         .map_err(|e| format!("failed to resolve @: {e}"))?;
                     rt.block_on(async {
                         let detection = detect_forges(env.repo.store(), env.config())?;
-                        let forge = detection
-                            .forges
-                            .into_values()
-                            .next()
-                            .ok_or("no forge detected — is a git remote configured?")?;
+
                         let trunk_name = env
                             .repo
                             .view()
@@ -68,9 +64,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             .find(|(_, target)| target.local_target.as_normal() == Some(&trunk))
                             .map(|(name, _)| name.as_str().to_string())
                             .ok_or("no bookmark found at trunk commit")?;
+
+                        let (forge, source_repo) = env.resolve_forge(detection.forges)?;
+
                         stack_submit::run(
                             &env,
                             forge.as_ref(),
+                            source_repo.as_deref(),
                             &env.store,
                             &trunk,
                             &head,

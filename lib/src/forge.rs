@@ -76,6 +76,13 @@ pub struct CreateParams<'a> {
     pub body: Option<&'a str>,
     /// Whether to create the change request as a draft.
     pub is_draft: bool,
+    /// Identity of the repository where the source branch lives, for
+    /// cross-repo (fork-to-upstream) change requests.
+    ///
+    /// When `None`, the source is assumed to be the same repository as the
+    /// target (no fork). When `Some`, the value is the fork's
+    /// [`Forge::repo_id`].
+    pub source_repo: Option<&'a str>,
 }
 
 /// Object-safe forge backend interface.
@@ -86,18 +93,20 @@ pub struct CreateParams<'a> {
 /// Methods return boxed futures to ensure dyn-compatibility. Implementations
 /// use `Box::pin(async move { ... })` to build the future.
 pub trait Forge: Send + Sync {
+    /// Opaque identity string for this forge's repository.
+    ///
+    /// Used to match a forge instance against the `target_repo` stored in
+    /// [`ForgeMeta`] when routing cross-repo (fork) operations to the correct
+    /// forge instance. The format is forge-specific and must not be parsed
+    /// by callers.
+    fn repo_id(&self) -> String;
+
     /// Create a new change request on the forge.
     fn create<'a>(&'a self, params: CreateParams<'a>) -> BoxFuture<'a, ForgeResult>;
 
     /// Fetch a change request by its stored metadata.
     fn get<'a>(&'a self, meta: &'a ForgeMeta) -> BoxFuture<'a, ForgeResult>;
 
-    /// Fetch multiple change requests in a single operation.
-    ///
-    /// Forges that support batching (e.g. GitHub via GraphQL) override this
-    /// for efficiency. The default calls [`Self::get`] sequentially.
-    ///
-    /// Results are returned in the same order as the input `metas`.
     /// Fetch multiple change requests in a single operation.
     ///
     /// Forges that support batching (e.g. GitHub via GraphQL) override this
@@ -114,10 +123,16 @@ pub trait Forge: Send + Sync {
     ///
     /// Useful for discovering existing CRs on the forge that are not yet
     /// tracked locally.
+    ///
+    /// `source_repo` narrows the search to cross-repo (fork) change requests
+    /// whose source branch lives in the specified repository. The format is
+    /// forge-specific and matches [`CreateParams::source_repo`]. When `None`,
+    /// the search is limited to same-repo change requests.
     fn find<'a>(
         &'a self,
         source_branch: Option<&'a str>,
         target_branch: Option<&'a str>,
+        source_repo: Option<&'a str>,
     ) -> BoxFuture<'a, ForgeResults>;
 
     /// Update the title and/or body of an existing change request.
@@ -157,12 +172,16 @@ pub trait Forge: Send + Sync {
     ///
     /// This is a convenience wrapper around [`Forge::find`] that extracts
     /// [`ForgeMeta`] from each result.
+    ///
+    /// `source_repo` is forwarded to [`Forge::find`] unchanged; see its
+    /// documentation for the forge-specific format.
     fn find_change_requests<'a>(
         &'a self,
         source_branch: &'a str,
+        source_repo: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Vec<ForgeMeta>, Box<dyn std::error::Error>>> {
         Box::pin(async move {
-            let crs = self.find(Some(source_branch), None).await?;
+            let crs = self.find(Some(source_branch), None, source_repo).await?;
             Ok(crs.iter().map(|cr| cr.to_forge_meta()).collect())
         })
     }

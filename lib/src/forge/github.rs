@@ -10,6 +10,7 @@ use url::Url;
 use crate::forge::{
     BoxFuture, ChangeRequest, ChangeStatus, CreateParams, Forge, ForgeResult, ForgeResults,
 };
+
 use crate::protos::change_request::forge_meta::Forge as ForgeOneof;
 use crate::protos::change_request::{ForgeMeta, GitHubMeta};
 
@@ -316,6 +317,19 @@ impl GitHubForge {
             _ => Err(GitHubError::WrongForge),
         }
     }
+
+    /// Format a branch reference for the GitHub API `head` parameter.
+    ///
+    /// GitHub requires `"owner:branch"` format for pull request head filters.
+    /// `source_repo` carries the full [`Forge::repo_id`] (`"owner/repo"`);
+    /// only the owner prefix is extracted. When `source_repo` is `None`,
+    /// falls back to this forge's own owner (same-repo PR).
+    fn format_head_ref(&self, branch: &str, source_repo: Option<&str>) -> String {
+        let owner = source_repo
+            .and_then(|r| r.split('/').next())
+            .unwrap_or(&self.owner);
+        format!("{owner}:{branch}")
+    }
 }
 
 /// Build a [`GitHubChangeRequest`] from an octocrab [`PullRequest`] response.
@@ -362,11 +376,17 @@ fn github_cr_from_pr(pr: &PullRequest, host: &str) -> GitHubChangeRequest {
 }
 
 impl Forge for GitHubForge {
+    fn repo_id(&self) -> String {
+        format!("{}/{}", self.owner, self.repo)
+    }
+
     fn create<'a>(&'a self, params: CreateParams<'a>) -> BoxFuture<'a, ForgeResult> {
         Box::pin(async move {
             let pulls = self.client.pulls(&self.owner, &self.repo);
+            let head = self.format_head_ref(params.source_branch, params.source_repo);
+
             let builder = pulls
-                .create(params.title, params.source_branch, params.target_branch)
+                .create(params.title, head, params.target_branch)
                 .draft(Some(params.is_draft))
                 .body::<String>(params.body.map(String::from));
 
@@ -392,6 +412,7 @@ impl Forge for GitHubForge {
         &'a self,
         source_branch: Option<&'a str>,
         target_branch: Option<&'a str>,
+        source_repo: Option<&'a str>,
     ) -> BoxFuture<'a, ForgeResults> {
         Box::pin(async move {
             let pulls = self.client.pulls(&self.owner, &self.repo);
@@ -401,8 +422,7 @@ impl Forge for GitHubForge {
                 .per_page(100);
 
             if let Some(head) = source_branch {
-                // GitHub requires "owner:branch" format for the head filter.
-                builder = builder.head(format!("{}:{head}", self.owner));
+                builder = builder.head(self.format_head_ref(head, source_repo));
             }
             if let Some(base) = target_branch {
                 builder = builder.base(base);
@@ -927,6 +947,7 @@ mod tests {
                 title: "New PR",
                 body: Some("body text"),
                 is_draft: false,
+                source_repo: None,
             })
             .await
             .unwrap();
@@ -949,7 +970,7 @@ mod tests {
             .await;
 
         let forge = mock_forge(&mock_server.uri());
-        let results = forge.find(None, None).await.unwrap();
+        let results = forge.find(None, None, None).await.unwrap();
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].id(), "1");
@@ -968,7 +989,7 @@ mod tests {
             .await;
 
         let forge = mock_forge(&mock_server.uri());
-        let results = forge.find(None, None).await.unwrap();
+        let results = forge.find(None, None, None).await.unwrap();
 
         assert!(results.is_empty());
     }
@@ -1345,5 +1366,139 @@ mod tests {
         assert!(query_str.contains("repository(owner: \"owner\", name: \"repo\")"));
         assert!(query_str.contains("pr0: pullRequest(number: 42)"));
         assert!(query_str.contains("pr1: pullRequest(number: 43)"));
+    }
+
+    // -- repo_id() --
+
+    #[tokio::test]
+    async fn repo_id_returns_owner_slash_repo() {
+        let forge = mock_forge("http://localhost");
+        assert_eq!(forge.repo_id(), format!("{OWNER}/{REPO}"));
+    }
+
+    // -- create() with source_repo (cross-repo PR) --
+
+    #[tokio::test]
+    async fn create_cross_repo_pr_formats_head_as_owner_colon_branch() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/pulls")))
+            .and(wiremock::matchers::body_partial_json(json!({
+                "head": "fork-user:feature-branch"
+            })))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(pr_json(77, "open", false, false)),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let forge = mock_forge(&mock_server.uri());
+        // source_repo is the fork's full repo_id; create() extracts the owner.
+        let cr = forge
+            .create(CreateParams {
+                source_branch: "feature-branch",
+                target_branch: "main",
+                title: "Cross-repo PR",
+                body: None,
+                is_draft: false,
+                source_repo: Some("fork-user/some-repo"),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(cr.id(), "77");
+    }
+
+    #[tokio::test]
+    async fn create_same_repo_pr_uses_owner_colon_branch() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/pulls")))
+            .and(wiremock::matchers::body_partial_json(json!({
+                "head": format!("{OWNER}:feature-branch")
+            })))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(pr_json(88, "open", false, false)),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let forge = mock_forge(&mock_server.uri());
+        let cr = forge
+            .create(CreateParams {
+                source_branch: "feature-branch",
+                target_branch: "main",
+                title: "Same-repo PR",
+                body: None,
+                is_draft: false,
+                source_repo: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(cr.id(), "88");
+    }
+
+    // -- find() with source_repo --
+
+    #[tokio::test]
+    async fn find_with_source_repo_uses_fork_owner_in_head_filter() {
+        let mock_server = MockServer::start().await;
+        // source_repo is "fork-user/some-repo"; owner "fork-user" is extracted.
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/pulls")))
+            .and(wiremock::matchers::query_param(
+                "head",
+                "fork-user:feature-branch",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&mock_server)
+            .await;
+
+        let forge = mock_forge(&mock_server.uri());
+        let results = forge
+            .find(Some("feature-branch"), None, Some("fork-user/some-repo"))
+            .await
+            .unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn find_without_source_repo_uses_forge_owner_in_head_filter() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/pulls")))
+            .and(wiremock::matchers::query_param(
+                "head",
+                format!("{OWNER}:feature-branch"),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&mock_server)
+            .await;
+
+        let forge = mock_forge(&mock_server.uri());
+        let results = forge
+            .find(Some("feature-branch"), None, None)
+            .await
+            .unwrap();
+
+        assert!(results.is_empty());
+    }
+
+    // -- format_head_ref tests --
+
+    #[tokio::test]
+    async fn format_head_ref_with_source_repo_extracts_owner() {
+        let forge = mock_forge("http://unused");
+        let head = forge.format_head_ref("feat", Some("fork-user/some-repo"));
+        assert_eq!(head, "fork-user:feat");
+    }
+
+    #[tokio::test]
+    async fn format_head_ref_without_source_repo_uses_forge_owner() {
+        let forge = mock_forge("http://unused");
+        let head = forge.format_head_ref("feat", None);
+        assert_eq!(head, format!("{OWNER}:feat"));
     }
 }

@@ -77,11 +77,11 @@ pub async fn run(
     let cr_state = load_change_requests(env);
 
     // Detect forges (read-only, no prompting for unmatched remotes).
-    let forge_map = detect_forge_map(env);
+    let detection = detect_forge_result(env);
 
     // Collect nodes and fetch live CR data.
     let nodes: Vec<&BookmarkNode> = graph.iter_graph()?.collect();
-    let live_crs = fetch_live_crs(&nodes, &cr_state, &forge_map).await;
+    let live_crs = fetch_live_crs(&nodes, &cr_state, &detection).await;
 
     // Render the graph.
     render_graph(
@@ -119,11 +119,12 @@ fn load_change_requests(env: &SpiceEnv) -> jj_spice_lib::protos::change_request:
         .unwrap_or_default()
 }
 
-/// Build a forge map from auto-detected forges only (no interactive prompts).
-fn detect_forge_map(env: &SpiceEnv) -> HashMap<String, Box<dyn Forge>> {
-    detect_forges(env.repo.store(), env.config())
-        .map(|DetectionResult { forges, .. }| forges)
-        .unwrap_or_default()
+/// Auto-detect forges from git remotes (no interactive prompts).
+fn detect_forge_result(env: &SpiceEnv) -> DetectionResult {
+    detect_forges(env.repo.store(), env.config()).unwrap_or(DetectionResult {
+        forges: HashMap::new(),
+        unmatched: Vec::new(),
+    })
 }
 
 /// Fetch live change request data for each bookmark that has stored metadata.
@@ -133,7 +134,7 @@ fn detect_forge_map(env: &SpiceEnv) -> HashMap<String, Box<dyn Forge>> {
 async fn fetch_live_crs(
     nodes: &[&BookmarkNode<'_>],
     cr_state: &jj_spice_lib::protos::change_request::ChangeRequests,
-    forge_map: &HashMap<String, Box<dyn Forge>>,
+    detection: &DetectionResult,
 ) -> HashMap<String, Result<Box<dyn ChangeRequest>, String>> {
     let mut results = HashMap::new();
 
@@ -151,12 +152,15 @@ async fn fetch_live_crs(
             None => continue,
         };
 
-        let forge = match find_forge_for_bookmark(node, forge_map) {
-            Some(f) => f,
-            None => {
-                results.insert(name.to_string(), Err("no forge detected".to_string()));
-                continue;
-            }
+        // For cross-repo (fork) PRs the CR lives on the upstream repo,
+        // not the fork the bookmark is tracked on. Try matching by
+        // target_repo first, then fall back to the tracked remote.
+        let forge = detection
+            .resolve_forge_for_meta(meta)
+            .or_else(|| find_forge_for_bookmark(node, &detection.forges));
+        let Some(forge) = forge else {
+            results.insert(name.to_string(), Err("no forge detected".to_string()));
+            continue;
         };
 
         let key = forge as *const dyn Forge;

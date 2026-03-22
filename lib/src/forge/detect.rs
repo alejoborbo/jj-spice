@@ -7,6 +7,8 @@ use jj_lib::store::Store;
 use thiserror::Error;
 use url::Url;
 
+use crate::protos::change_request::ForgeMeta;
+
 use super::Forge;
 use super::github::{GitHubForge, build_octocrab_for_github};
 
@@ -44,6 +46,26 @@ pub struct DetectionResult {
     pub forges: HashMap<String, Box<dyn Forge>>,
     /// Remotes with a parseable owner/repo but no recognised forge hostname.
     pub unmatched: Vec<UnmatchedRemote>,
+}
+
+impl DetectionResult {
+    /// Resolve the forge instance that owns a change request.
+    ///
+    /// For cross-repo (fork) PRs the `target_repo` stored in [`ForgeMeta`]
+    /// identifies where the CR lives (`"upstream-org/repo"`). This method
+    /// looks through the detected forges for an instance whose
+    /// [`Forge::repo_id`] matches that target.
+    ///
+    /// When `target_repo` is empty (same-repo CR) or no match is found,
+    /// returns `None` so the caller can fall back to the default forge
+    /// selection (e.g. by tracked remote).
+    pub fn resolve_forge_for_meta(&self, meta: &ForgeMeta) -> Option<&dyn Forge> {
+        let target = meta.target_repo()?;
+        self.forges
+            .values()
+            .find(|f| f.repo_id() == target)
+            .map(|f| f.as_ref())
+    }
 }
 
 /// Errors that can occur when detecting forges from git remotes.

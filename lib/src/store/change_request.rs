@@ -23,6 +23,18 @@ impl ForgeMeta {
         }
     }
 
+    /// Return the target repository identity stored in the metadata.
+    ///
+    /// For cross-repo (fork) change requests this identifies where the CR
+    /// lives (e.g. `"upstream-org/repo"`). Returns `None` when the field is
+    /// empty (same-repo CR) or the forge variant is absent.
+    pub fn target_repo(&self) -> Option<&str> {
+        match &self.forge {
+            Some(ForgeOneof::Github(gh)) if !gh.target_repo.is_empty() => Some(&gh.target_repo),
+            _ => None,
+        }
+    }
+
     /// Return the comment ID stored in the forge-specific metadata, if any.
     pub fn comment_id(&self) -> Option<u64> {
         match &self.forge {

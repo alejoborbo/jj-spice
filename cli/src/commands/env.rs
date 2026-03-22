@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use jj_cli::cli_util::{GlobalArgs, RevisionArg, find_workspace_dir};
@@ -13,7 +14,7 @@ use jj_lib::git::GitSettings;
 use jj_lib::id_prefix::IdPrefixContext;
 use jj_lib::op_walk;
 use jj_lib::ref_name::RemoteNameBuf;
-use jj_lib::repo::{ReadonlyRepo, StoreFactories};
+use jj_lib::repo::{ReadonlyRepo, Repo as _, StoreFactories};
 use jj_lib::repo_path::RepoPathUiConverter;
 use jj_lib::revset::{
     ResolvedRevsetExpression, RevsetAliasesMap, RevsetDiagnostics, RevsetExtensions,
@@ -21,6 +22,12 @@ use jj_lib::revset::{
 };
 use jj_lib::settings::UserSettings;
 use jj_lib::workspace::{Workspace, default_working_copy_factories};
+
+use jj_spice_lib::forge::Forge;
+
+/// Resolved forge for PR creation, with an optional source repository
+/// identifier for cross-repo (fork) head refs.
+pub(crate) type ResolvedForge = (Box<dyn Forge>, Option<String>);
 
 use jj_spice_lib::store::SpiceStore;
 
@@ -136,6 +143,99 @@ impl SpiceEnv {
             .get::<String>(["git", "push"])
             .unwrap_or_else(|_| "origin".to_string());
         RemoteNameBuf::from(name)
+    }
+
+    /// Resolve the upstream remote for PR creation in fork mode.
+    ///
+    /// Priority:
+    /// 1. `spice.upstream-remote` config (explicit override).
+    /// 2. `"upstream"` if a remote with that name exists in the git repo.
+    /// 3. `None` — single-remote mode, push remote is also the PR target.
+    pub(crate) fn get_upstream_remote(&self) -> Option<RemoteNameBuf> {
+        // 1. Explicit config override.
+        if let Ok(name) = self.config().get::<String>(["spice", "upstream-remote"])
+            && !name.is_empty()
+        {
+            return Some(RemoteNameBuf::from(name));
+        }
+        // 2. Fall back to "upstream" if that remote exists.
+        let git_repo = jj_lib::git::get_git_repo(self.repo.store()).ok()?;
+        // Check if any remote is named "upstream" by iterating all remote names.
+        let has_upstream = git_repo
+            .remote_names()
+            .iter()
+            .any(|n| n.as_ref() == b"upstream");
+        if has_upstream {
+            return Some(RemoteNameBuf::from("upstream"));
+        }
+        None
+    }
+
+    /// Whether a git remote with the given name is configured in this repo.
+    fn remote_exists(&self, remote: &RemoteNameBuf) -> bool {
+        let Ok(git_repo) = jj_lib::git::get_git_repo(self.repo.store()) else {
+            return false;
+        };
+        git_repo
+            .remote_names()
+            .iter()
+            .any(|n| n.as_ref() == remote.as_str().as_bytes())
+    }
+
+    /// Whether fork mode is active.
+    ///
+    /// Fork mode requires **two distinct remotes** that both exist: the push
+    /// remote (the fork, defaulting to `"origin"`) and the upstream remote
+    /// (where PRs are created). Returns `false` when only one remote is
+    /// configured — even if it happens to be named `"upstream"` — because
+    /// there is no fork relationship to express.
+    ///
+    /// When `true`, branches are pushed to the push remote while change
+    /// requests are created against the upstream remote.
+    pub(crate) fn is_fork_mode(&self) -> bool {
+        let Some(upstream) = self.get_upstream_remote() else {
+            return false;
+        };
+        let push = self.get_default_remote();
+        // The two remotes must be distinct, and the push remote must actually
+        // exist (it may only be a config default like "origin").
+        upstream != push && self.remote_exists(&push)
+    }
+
+    /// Resolve the forge and optional source repository for PR creation.
+    ///
+    /// In **fork mode** (two distinct remotes), PRs target the upstream forge
+    /// while branches are pushed to the fork (push remote). The fork's
+    /// `repo_id` is returned as `source_repo` so the forge can format
+    /// cross-repo head refs (e.g. `"fork-owner:branch"`).
+    ///
+    /// In **single-remote mode**, the only detected forge is used directly
+    /// and `source_repo` is `None`.
+    pub(crate) fn resolve_forge(
+        &self,
+        mut forges: HashMap<String, Box<dyn Forge>>,
+    ) -> Result<ResolvedForge, Box<dyn std::error::Error>> {
+        if self.is_fork_mode() {
+            let upstream_remote = self.get_upstream_remote().unwrap();
+            let push_remote = self.get_default_remote();
+
+            let fork_repo_id = forges.get(push_remote.as_str()).map(|f| f.repo_id());
+            let upstream_forge = forges.remove(upstream_remote.as_str()).ok_or_else(|| {
+                format!(
+                    "upstream remote `{}` has no \
+                         detected forge — check your git remotes",
+                    upstream_remote.as_str()
+                )
+            })?;
+
+            Ok((upstream_forge, fork_repo_id))
+        } else {
+            let forge = forges
+                .into_values()
+                .next()
+                .ok_or("no forge detected — is a git remote configured?")?;
+            Ok((forge, None))
+        }
     }
 
     /// Resolve a revset expression to exactly one commit ID.

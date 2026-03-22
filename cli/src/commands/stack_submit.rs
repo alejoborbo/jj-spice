@@ -18,9 +18,14 @@ use jj_spice_lib::store::change_request::ChangeRequestStore;
 use crate::commands::env::SpiceEnv;
 
 /// Create change requests for each bookmark in the current stack (trunk..@).
+///
+/// `source_repo` identifies the fork repository for cross-repo PRs; it is
+/// `None` in single-remote mode. See [`CreateParams::source_repo`] for the
+/// forge-specific format.
 pub async fn run(
     env: &SpiceEnv,
     forge: &dyn Forge,
+    source_repo: Option<&str>,
     store: &SpiceStore,
     trunk: &CommitId,
     head: &CommitId,
@@ -40,7 +45,9 @@ pub async fn run(
         check_untracked_changes(&env.ui, env, bookmark)?;
 
         // If the change request already exists, retarget if needed.
-        let existing = get_existing_change_request(&env.ui, &state, forge, bookmark.name()).await?;
+        let existing =
+            get_existing_change_request(&env.ui, &state, forge, bookmark.name(), source_repo)
+                .await?;
 
         let base_bookmark = match ascendants.len() {
             0 => trunk_name,
@@ -105,6 +112,7 @@ pub async fn run(
             title: &title,
             body: Some(&description),
             is_draft,
+            source_repo,
         };
 
         let cr = forge.create(params).await?;
@@ -216,11 +224,15 @@ fn check_untracked_changes(
 /// 1. Check local state first — if already tracked, return it.
 /// 2. Query the forge for CRs matching source/target branches.
 /// 3. If multiple CRs are found, prompt the user to pick one.
+///
+/// `source_repo` is forwarded to [`Forge::find_change_requests`] for
+/// cross-repo PR discovery; pass `None` in single-remote mode.
 async fn get_existing_change_request(
     ui: &jj_cli::ui::Ui,
     state: &ChangeRequests,
     forge: &dyn Forge,
     bookmark: &str,
+    source_repo: Option<&str>,
 ) -> Result<Option<ForgeMeta>, Box<dyn std::error::Error>> {
     // Check local state first.
     if let Some(meta) = state.get(bookmark) {
@@ -228,7 +240,7 @@ async fn get_existing_change_request(
     }
 
     // Query the forge.
-    let metas = forge.find_change_requests(bookmark).await?;
+    let metas = forge.find_change_requests(bookmark, source_repo).await?;
 
     match metas.len() {
         0 => Ok(None),

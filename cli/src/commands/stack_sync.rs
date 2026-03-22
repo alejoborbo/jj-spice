@@ -216,19 +216,51 @@ async fn sync_bookmark(
         return Err(BookmarkSyncError::NoTrackedRemotes);
     }
 
-    // Collect all CRs across all tracked remotes.
+    // Collect CRs across all forges reachable from tracked remotes, plus
+    // any other forge in the map that may host cross-repo (fork) PRs.
+    // This ensures PRs opened against an upstream repo are discovered even
+    // when the bookmark is only tracked on the fork remote.
     let mut all_crs: Vec<ForgeMeta> = Vec::new();
+    let mut queried_repos: HashSet<String> = HashSet::new();
 
+    // 1. Query forges matching tracked remotes (primary lookup).
+    //    Also collect their repo_ids — these are the potential fork
+    //    identities used to search for cross-repo PRs in step 2.
     let mut found_forge = false;
+    let mut tracked_repo_ids: Vec<String> = Vec::new();
     for remote_name in &tracked_remotes {
         let forge_instance = match forge_map.get(*remote_name) {
             Some(f) => f,
             None => continue,
         };
         found_forge = true;
+        let repo_id = forge_instance.repo_id();
+        queried_repos.insert(repo_id.clone());
+        tracked_repo_ids.push(repo_id);
 
-        let crs = forge_instance.find_change_requests(bookmark.name()).await?;
+        let crs = forge_instance
+            .find_change_requests(bookmark.name(), None)
+            .await?;
         all_crs.extend(crs);
+    }
+
+    // 2. Query remaining forges that weren't reached via tracked remotes.
+    //    For each, try with every tracked forge as a potential source (fork)
+    //    so cross-repo PRs are found via the correct head filter
+    //    (e.g. "fork-owner:branch" instead of "upstream-owner:branch").
+    for forge_instance in forge_map.values() {
+        if queried_repos.contains(&forge_instance.repo_id()) {
+            continue;
+        }
+        for source_id in &tracked_repo_ids {
+            let crs = forge_instance
+                .find_change_requests(bookmark.name(), Some(source_id))
+                .await?;
+            if !crs.is_empty() {
+                found_forge = true;
+                all_crs.extend(crs);
+            }
+        }
     }
 
     if !found_forge {
