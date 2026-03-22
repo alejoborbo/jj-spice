@@ -13,8 +13,8 @@ use jj_spice_lib::comments::Comment;
 use jj_spice_lib::forge::{CreateParams, Forge};
 use jj_spice_lib::protos::change_request::{ChangeRequests, ForgeMeta};
 use jj_spice_lib::store::change_request::ChangeRequestStore;
-use jj_spice_lib::store::SpiceStore;
 
+use crate::commands::cli::SubmitArgs;
 use crate::commands::env::SpiceEnv;
 
 /// Create change requests for each bookmark in the current stack (trunk..@).
@@ -23,14 +23,15 @@ use crate::commands::env::SpiceEnv;
 /// `None` in single-remote mode. See [`CreateParams::source_repo`] for the
 /// forge-specific format.
 pub async fn run(
+    args: &SubmitArgs,
     env: &SpiceEnv,
     forge: &dyn Forge,
     source_repo: Option<&str>,
-    store: &SpiceStore,
     trunk: &CommitId,
     head: &CommitId,
     trunk_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let store = &env.store;
     let cr_store = ChangeRequestStore::new(store);
     let graph = BookmarkGraph::new(env.repo.as_ref(), trunk, head)?;
     let text_editor = TextEditor::from_settings(&env.settings)?;
@@ -45,9 +46,15 @@ pub async fn run(
         check_untracked_changes(&env.ui, env, bookmark)?;
 
         // If the change request already exists, retarget if needed.
-        let existing =
-            get_existing_change_request(&env.ui, &state, forge, bookmark.name(), source_repo)
-                .await?;
+        let existing = get_existing_change_request(
+            &env.ui,
+            &state,
+            forge,
+            bookmark.name(),
+            source_repo,
+            args.allow_inactive,
+        )
+        .await?;
 
         let base_bookmark = match ascendants.len() {
             0 => trunk_name,
@@ -233,6 +240,7 @@ async fn get_existing_change_request(
     forge: &dyn Forge,
     bookmark: &str,
     source_repo: Option<&str>,
+    allow_inactive: bool,
 ) -> Result<Option<ForgeMeta>, Box<dyn std::error::Error>> {
     // Check local state first.
     if let Some(meta) = state.get(bookmark) {
@@ -244,7 +252,14 @@ async fn get_existing_change_request(
         .find_change_requests(bookmark, source_repo)
         .await?
         .iter()
-        .map(|cr| cr.to_forge_meta())
+        .filter_map(|cr| {
+            // If --allow-inactive is not set, we remote change request being
+            // closed or merged.
+            if !allow_inactive && cr.as_ref().status().is_inactive() {
+                return None;
+            }
+            Some(cr.to_forge_meta())
+        })
         .collect::<Vec<_>>();
 
     match metas.len() {

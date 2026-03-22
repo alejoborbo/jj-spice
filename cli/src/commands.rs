@@ -49,7 +49,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 StackCommand::Log(log_args) => {
                     rt.block_on(stack_log::run(&env, &trunk, log_args.revisions.as_deref()))
                 }
-                StackCommand::Submit => {
+                StackCommand::Submit(submit_args) => {
                     let head = env
                         .resolve_single_rev(&RevisionArg::AT)
                         .map_err(|e| format!("failed to resolve @: {e}"))?;
@@ -67,10 +67,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         let (forge, source_repo) = env.resolve_forge(detection.forges)?;
 
                         stack_submit::run(
+                            &submit_args,
                             &env,
                             forge.as_ref(),
                             source_repo.as_deref(),
-                            &env.store,
                             &trunk,
                             &head,
                             &trunk_name,

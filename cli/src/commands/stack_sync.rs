@@ -266,9 +266,12 @@ async fn sync_bookmark(
             continue;
         }
         for source_id in &tracked_repo_ids {
-            let crs = forge_instance
+            let crs: Vec<_> = forge_instance
                 .find_change_requests(bookmark.name(), Some(source_id))
-                .await?;
+                .await?
+                .iter()
+                .map(|cr| cr.to_forge_meta())
+                .collect();
             if !crs.is_empty() {
                 found_forge = true;
                 all_crs.extend(crs);

@@ -47,7 +47,7 @@ pub enum StackCommand {
     /// Show the bookmark DAG with change request status.
     Log(LogArgs),
     /// Submit the current stack of bookmarks for review.
-    Submit,
+    Submit(SubmitArgs),
     /// Discover and track existing change requests for bookmarks in the stack.
     Sync(SyncArgs),
 }
@@ -64,6 +64,19 @@ pub struct LogArgs {
     /// Use `-r 'trunk()..@'` to see only the current stack.
     #[arg(short = 'r', long)]
     pub revisions: Option<String>,
+}
+
+/// Arguments for `jj-spice stack submit`.
+#[derive(Args, Clone, Debug)]
+pub struct SubmitArgs {
+    /// Allow intactive (merged and closed) change requests to be tracked.
+    ///
+    /// Allow tracking closed and merged change requests when fetching them
+    /// from remote.
+    ///
+    /// By default, jj-spice will only track change requests that are open, or in draft.
+    #[arg(long, default_value_t = false)]
+    pub allow_inactive: bool,
 }
 
 /// Arguments for `jj-spice stack sync`.
@@ -203,7 +216,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             SpiceCommand::Stack(StackArgs {
-                command: StackCommand::Submit
+                command: StackCommand::Submit(_)
             })
         ));
     }
