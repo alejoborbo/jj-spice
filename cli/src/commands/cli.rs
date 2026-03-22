@@ -1,5 +1,5 @@
-use clap::builder::Styles;
 use clap::builder::styling::AnsiColor;
+use clap::builder::Styles;
 use clap::{Args, Command, Parser, Subcommand};
 use jj_cli::cli_util::GlobalArgs;
 
@@ -15,7 +15,7 @@ const STYLES: Styles = Styles::styled()
 
 /// jj-spice: forge integration for jj.
 #[derive(Parser, Clone, Debug)]
-#[command(name = "jj-spice", styles = STYLES)]
+#[command(name = "jj-spice", styles = STYLES, version, about, long_about = None)]
 pub struct Cli {
     #[command(flatten)]
     pub global_args: GlobalArgs,
@@ -126,8 +126,7 @@ pub enum ShellCompletion {
 impl ShellCompletion {
     /// Generate a completion script for this shell from the given [`Command`].
     pub fn generate(self, cmd: &mut Command) -> Vec<u8> {
-        use clap_complete::Shell;
-        use clap_complete::generate;
+        use clap_complete::{generate, Shell};
         use clap_complete_nushell::Nushell;
 
         let bin_name = "jj-spice";
@@ -146,8 +145,9 @@ impl ShellCompletion {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use clap::Parser;
+
+    use super::*;
 
     #[test]
     fn parse_stack_log() {
