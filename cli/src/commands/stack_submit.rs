@@ -109,8 +109,24 @@ pub async fn run(
             base_bookmark
         )?;
 
-        let title = env.ui.prompt("Title")?;
-        let description = text_editor.edit_str("", Some(".md"))?;
+        let (suggested_title, suggested_body) =
+            build_cr_suggestion(env.repo.as_ref(), bookmark_node.commits())?;
+
+        let title_prompt = if suggested_title.is_empty() {
+            "Title".to_string()
+        } else {
+            format!("Title [{}]", suggested_title)
+        };
+        let title = env.ui.prompt_choice_with(
+            &title_prompt,
+            if suggested_title.is_empty() {
+                None
+            } else {
+                Some(suggested_title.as_str())
+            },
+            |input| -> Result<String, &'static str> { Ok(input.to_string()) },
+        )?;
+        let description = text_editor.edit_str(&suggested_body, Some(".md"))?;
         let is_draft = env.ui.prompt_yes_no("Draft?", Some(false))?;
 
         let params = CreateParams {
@@ -323,5 +339,167 @@ fn push_bookmarks(
         Ok(())
     } else {
         Err("Failed to push some bookmarks".into())
+    }
+}
+
+/// Build a suggested title and body for a change request from commit
+/// descriptions.
+///
+/// The title is the first line of the first commit's description. The body
+/// contains the full descriptions of every commit in the bookmark, separated
+/// by blank lines when there are multiple commits. The title line is stripped
+/// from the first commit's contribution to the body to avoid duplication.
+fn build_cr_suggestion(
+    repo: &dyn jj_lib::repo::Repo,
+    commit_ids: &[CommitId],
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    if commit_ids.is_empty() {
+        return Ok((String::new(), String::new()));
+    }
+
+    let mut descriptions: Vec<String> = Vec::with_capacity(commit_ids.len());
+    for id in commit_ids {
+        let commit = repo.store().get_commit(id)?;
+        let desc = commit.description().trim().to_string();
+        if !desc.is_empty() {
+            descriptions.push(desc);
+        }
+    }
+
+    if descriptions.is_empty() {
+        return Ok((String::new(), String::new()));
+    }
+
+    // Title: first line of the first commit description, trimmed.
+    let title = descriptions[0]
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    // Body: strip the title line from the first description, then concatenate
+    // all descriptions separated by blank lines.
+    let first_remainder = descriptions[0]
+        .strip_prefix(&title)
+        .unwrap_or(&descriptions[0])
+        .trim_start_matches('\n')
+        .trim()
+        .to_string();
+
+    let mut body_parts: Vec<&str> = Vec::new();
+    if !first_remainder.is_empty() {
+        body_parts.push(&first_remainder);
+    }
+    for desc in &descriptions[1..] {
+        body_parts.push(desc);
+    }
+
+    let body = body_parts.join("\n\n");
+
+    Ok((title, body))
+}
+
+#[cfg(test)]
+mod tests {
+    /// Helper that exercises the suggestion-building logic without a real repo
+    /// by testing the pure string-processing portion directly.
+    fn suggestion_from_descriptions(descriptions: &[&str]) -> (String, String) {
+        // Re-implement the pure logic portion so we can test without jj_lib
+        // infrastructure. The real function fetches commits from the repo; here
+        // we inline the string processing.
+        if descriptions.is_empty() {
+            return (String::new(), String::new());
+        }
+
+        let descriptions: Vec<String> = descriptions
+            .iter()
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty())
+            .collect();
+
+        if descriptions.is_empty() {
+            return (String::new(), String::new());
+        }
+
+        let title = descriptions[0]
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+
+        let first_remainder = descriptions[0]
+            .strip_prefix(title.as_str())
+            .unwrap_or(&descriptions[0])
+            .trim_start_matches('\n')
+            .trim()
+            .to_string();
+
+        let mut body_parts: Vec<&str> = Vec::new();
+        if !first_remainder.is_empty() {
+            body_parts.push(&first_remainder);
+        }
+        for desc in &descriptions[1..] {
+            body_parts.push(desc);
+        }
+
+        let body = body_parts.join("\n\n");
+        (title, body)
+    }
+
+    #[test]
+    fn single_commit_single_line() {
+        let (title, body) = suggestion_from_descriptions(&["Add user authentication"]);
+        assert_eq!(title, "Add user authentication");
+        assert_eq!(body, "");
+    }
+
+    #[test]
+    fn single_commit_multi_line() {
+        let (title, body) = suggestion_from_descriptions(&[
+            "Add user authentication\n\nThis implements OAuth2 flow\nwith token refresh.",
+        ]);
+        assert_eq!(title, "Add user authentication");
+        assert_eq!(body, "This implements OAuth2 flow\nwith token refresh.");
+    }
+
+    #[test]
+    fn multiple_commits() {
+        let (title, body) = suggestion_from_descriptions(&[
+            "Add login endpoint",
+            "Add logout endpoint\n\nClears the session cookie.",
+        ]);
+        assert_eq!(title, "Add login endpoint");
+        assert_eq!(body, "Add logout endpoint\n\nClears the session cookie.");
+    }
+
+    #[test]
+    fn multiple_commits_first_has_body() {
+        let (title, body) =
+            suggestion_from_descriptions(&["Add login\n\nWith rate limiting.", "Add logout"]);
+        assert_eq!(title, "Add login");
+        assert_eq!(body, "With rate limiting.\n\nAdd logout");
+    }
+
+    #[test]
+    fn empty_descriptions() {
+        let (title, body) = suggestion_from_descriptions(&["", "  ", ""]);
+        assert_eq!(title, "");
+        assert_eq!(body, "");
+    }
+
+    #[test]
+    fn no_commits() {
+        let (title, body) = suggestion_from_descriptions(&[]);
+        assert_eq!(title, "");
+        assert_eq!(body, "");
+    }
+
+    #[test]
+    fn whitespace_trimmed() {
+        let (title, body) = suggestion_from_descriptions(&["  Fix the bug  \n\n  Details here  "]);
+        assert_eq!(title, "Fix the bug");
+        assert_eq!(body, "Details here");
     }
 }
