@@ -12,7 +12,7 @@ pub struct ChangeRequests {
 /// Wrapper for the forge-specific oneof.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ForgeMeta {
-    #[prost(oneof = "forge_meta::Forge", tags = "10")]
+    #[prost(oneof = "forge_meta::Forge", tags = "10, 11")]
     pub forge: ::core::option::Option<forge_meta::Forge>,
 }
 /// Nested message and enum types in `ForgeMeta`.
@@ -21,6 +21,8 @@ pub mod forge_meta {
     pub enum Forge {
         #[prost(message, tag = "10")]
         Github(super::GitHubMeta),
+        #[prost(message, tag = "11")]
+        Gitlab(super::GitLabMeta),
     }
 }
 /// GitHub Pull Request identity.
@@ -46,5 +48,27 @@ pub struct GitHubMeta {
     pub graphql_id: ::prost::alloc::string::String,
     /// comment ID, for updating the stack trace in the Pull Request
     #[prost(uint64, optional, tag = "7")]
+    pub comment_id: ::core::option::Option<u64>,
+}
+/// GitLab Merge Request identity.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GitLabMeta {
+    /// MR ID
+    #[prost(uint64, tag = "1")]
+    pub id: u64,
+    /// MR IID (Internal ID)
+    #[prost(uint64, tag = "2")]
+    pub iid: u64,
+    /// head ref pushed to GitLab
+    #[prost(string, tag = "3")]
+    pub source_branch: ::prost::alloc::string::String,
+    /// base ref (e.g. "main")
+    #[prost(string, tag = "4")]
+    pub target_branch: ::prost::alloc::string::String,
+    /// fork origin, empty for same-repo
+    #[prost(uint64, optional, tag = "5")]
+    pub source_project_id: ::core::option::Option<u64>,
+    /// comment ID, for updating the stack trace in the Merge Request
+    #[prost(uint64, optional, tag = "6")]
     pub comment_id: ::core::option::Option<u64>,
 }

@@ -17,16 +17,27 @@ message ChangeRequests {
 message ForgeMeta {
   oneof forge {
     GitHubMeta github = 10;
+    GitLabMeta gitlab = 11;
   }
 }
 
 // GitHub Pull Request identity.
 message GitHubMeta {
-  uint64 number = 1;          // PR number
-  string source_branch = 2;   // head ref pushed to GitHub
-  string target_branch = 3;   // base ref (e.g. "main")
-  string source_repo = 4;     // fork origin (e.g. "user/repo"), empty for same-repo
-  string target_repo = 5;     // target repo (e.g. "owner/repo"), empty for same-repo
-  string graphql_id = 6;      // GraphQL node ID, for future mutation use
+  uint64 number = 1;                   // PR number
+  string source_branch = 2;            // head ref pushed to GitHub
+  string target_branch = 3;            // base ref (e.g. "main")
+  string source_repo = 4;              // fork origin (e.g. "user/repo"), empty for same-repo
+  string target_repo = 5;              // target repo (e.g. "owner/repo"), empty for same-repo
+  string graphql_id = 6;               // GraphQL node ID, for future mutation use
   optional uint64 comment_id = 7;      // comment ID, for updating the stack trace in the Pull Request
+}
+
+// GitLab Merge Request identity.
+message GitLabMeta {
+  uint64 id = 1;                              // MR ID
+  uint64 iid = 2;                             // MR IID (Internal ID)                     
+  string source_branch = 3;                   // head ref pushed to GitLab
+  string target_branch = 4;                   // base ref (e.g. "main")
+  optional uint64 source_project_id = 5;      // fork origin, empty for same-repo
+  optional uint64 comment_id = 6;             // comment ID, for updating the stack trace in the Merge Request
 }
