@@ -300,13 +300,45 @@ impl SpiceEnv {
     }
 }
 
+/// Build a [`Ui`] from default + user config, with optional CLI overrides.
+///
+/// Loads the jj config stack up to user-level (defaults → environment →
+/// user config file), then applies `--no-pager` and `--color` overrides.
+/// Workspace and repo config are **not** loaded — they may not exist when
+/// the user asks for `--help` outside a jj repository.
+///
+/// This is the shared config/Ui bootstrap used by both the early `--help`
+/// path (in `main.rs`) and the full [`SpiceEnv::init`] pipeline (via
+/// [`load_config`]).
+pub(crate) fn load_ui(
+    no_pager: bool,
+    color: Option<&str>,
+) -> Result<(Ui, ConfigEnv, jj_cli::config::RawConfig), Box<dyn std::error::Error>> {
+    let config_env = ConfigEnv::from_environment();
+    let mut raw_config = config_from_environment(default_config_layers());
+    config_env.reload_user_config(&mut raw_config)?;
+
+    let mut cli_layer = ConfigLayer::empty(ConfigSource::CommandArg);
+    if no_pager {
+        cli_layer.set_value("ui.paginate", "never").unwrap();
+    }
+    if let Some(value) = color {
+        cli_layer.set_value("ui.color", value).unwrap();
+    }
+    if !cli_layer.is_empty() {
+        raw_config.as_mut().add_layer(cli_layer);
+    }
+
+    let config = config_env.resolve_config(&raw_config)?;
+    let ui = Ui::with_config(&config).map_err(cmd_err)?;
+    Ok((ui, config_env, raw_config))
+}
+
 /// Load the full jj config stack and locate the workspace root.
 ///
-/// Uses jj-cli's public config pipeline: defaults → user → repo → workspace.
-/// Applies command-line overrides from [`GlobalArgs`]:
-/// - `--repository` (`-R`) overrides the workspace search path
-/// - `--config NAME=VALUE` and `--config-file PATH` add config layers
-/// - `--color`, `--quiet`, `--no-pager` override UI settings
+/// Builds on [`load_ui`] by additionally loading repo and workspace config,
+/// applying `--config`, `--config-file`, `--quiet` overrides from
+/// [`GlobalArgs`], and resolving the workspace root directory.
 ///
 /// Returns the resolved config, UI, workspace root, and the [`ConfigEnv`] so
 /// callers can later locate config files for writing.
@@ -322,9 +354,11 @@ fn load_config(
     ),
     Box<dyn std::error::Error>,
 > {
-    let mut config_env = ConfigEnv::from_environment();
-    let mut raw_config = config_from_environment(default_config_layers());
-    config_env.reload_user_config(&mut raw_config)?;
+    let early = &global_args.early_args;
+    let (_, mut config_env, mut raw_config) = load_ui(
+        early.no_pager.unwrap_or_default(),
+        early.color.map(|c| c.to_string()).as_deref(),
+    )?;
 
     // Resolve the workspace root: --repository overrides cwd-based discovery.
     let workspace_root = if let Some(repo_path) = &global_args.repository {
@@ -364,7 +398,6 @@ fn load_config(
         .map_err(cmd_err)?;
 
     // Apply --config and --config-file as CommandArg-priority layers.
-    let early = &global_args.early_args;
     let config_args: Vec<(ConfigArgKind, &str)> = early
         .config
         .iter()
@@ -384,19 +417,12 @@ fn load_config(
         }
     }
 
-    // Apply --color, --quiet, --no-pager as highest-priority config overrides.
-    let mut cli_layer = ConfigLayer::empty(ConfigSource::CommandArg);
-    if let Some(choice) = early.color {
-        cli_layer.set_value("ui.color", choice.to_string()).unwrap();
-    }
+    // Apply --quiet as highest-priority config override.
+    // (--no-pager and --color are already applied by load_ui above.)
     if early.quiet.unwrap_or_default() {
-        cli_layer.set_value("ui.quiet", true).unwrap();
-    }
-    if early.no_pager.unwrap_or_default() {
-        cli_layer.set_value("ui.paginate", "never").unwrap();
-    }
-    if !cli_layer.data.is_empty() {
-        raw_config.as_mut().add_layer(cli_layer);
+        let mut layer = ConfigLayer::empty(ConfigSource::CommandArg);
+        layer.set_value("ui.quiet", true).unwrap();
+        raw_config.as_mut().add_layer(layer);
     }
 
     let config = config_env.resolve_config(&raw_config)?;
