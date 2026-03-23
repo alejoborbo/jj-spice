@@ -447,6 +447,7 @@ fn render_status_pill(
 fn format_meta_id(meta: &ForgeMeta) -> String {
     match &meta.forge {
         Some(ForgeOneof::Github(gh)) => gh.number.to_string(),
+        Some(ForgeOneof::Gitlab(gl)) => format!("!{}", gl.iid),
         None => "?".to_string(),
     }
 }

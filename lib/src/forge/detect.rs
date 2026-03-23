@@ -7,14 +7,14 @@ use jj_lib::store::Store;
 use thiserror::Error;
 use url::Url;
 
-use crate::protos::change_request::ForgeMeta;
-
 use super::Forge;
 use super::github::{GitHubForge, build_octocrab_for_github};
+use super::gitlab::{GitLabForge, build_gitlab_client};
+use crate::protos::change_request::ForgeMeta;
 
 /// Supported forge type identifiers for interactive selection and config
 /// persistence.
-pub const FORGE_TYPES: &[&str] = &["github"];
+pub const FORGE_TYPES: &[&str] = &["github", "gitlab"];
 
 /// Intermediate detection result before constructing a forge client.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -22,6 +22,11 @@ enum DetectedForge {
     GitHub {
         owner: String,
         repo: String,
+        base_url: Option<Url>,
+    },
+    GitLab {
+        group: String,
+        project: String,
         base_url: Option<Url>,
     },
 }
@@ -177,6 +182,29 @@ fn build_forge(
                 graphql_url,
             )))
         }
+        DetectedForge::GitLab {
+            group,
+            project,
+            base_url,
+        } => {
+            let (client, token) =
+                build_gitlab_client().map_err(|e| ForgeDetectionError::ForgeCreation {
+                    remote: remote.to_string(),
+                    forge_type: "GitLab",
+                    source: Box::new(e),
+                })?;
+            let host = base_url
+                .as_ref()
+                .and_then(|u| u.host_str().map(String::from))
+                .unwrap_or_else(|| "gitlab.com".to_string());
+            let project_path = format!("{group}/{project}");
+            Ok(Box::new(GitLabForge::new(
+                client,
+                host,
+                token,
+                project_path,
+            )))
+        }
     }
 }
 
@@ -215,6 +243,21 @@ pub fn build_forge_for_type(
                 graphql_url,
             )))
         }
+        "gitlab" => {
+            let (client, token) =
+                build_gitlab_client().map_err(|e| ForgeDetectionError::ForgeCreation {
+                    remote: remote.to_string(),
+                    forge_type: "GitLab",
+                    source: Box::new(e),
+                })?;
+            let project_path = format!("{owner}/{repo}");
+            Ok(Box::new(GitLabForge::new(
+                client,
+                hostname,
+                token,
+                project_path,
+            )))
+        }
         other => Err(ForgeDetectionError::ForgeCreation {
             remote: remote.to_string(),
             forge_type: "unknown",
@@ -249,6 +292,30 @@ fn detect_forge_from_host(
             owner,
             repo,
             base_url,
+        });
+    }
+
+    // Check if this host is a known GitLab instance.
+    let is_gitlab = if host == "gitlab.com" {
+        true
+    } else {
+        let key: &[&str] = &["spice", "forges", host, "type"];
+        matches!(config.get::<String>(key), Ok(ref t) if t == "gitlab")
+    };
+
+    if is_gitlab {
+        let (group, project) = parse_owner_repo(path_str)?;
+        return Some(DetectedForge::GitLab {
+            group,
+            project,
+            base_url: if host == "gitlab.com" {
+                None
+            } else {
+                Some(
+                    Url::parse(&format!("https://{host}"))
+                        .expect("hostname should form a valid URL"),
+                )
+            },
         });
     }
 
@@ -365,7 +432,7 @@ mod tests {
     #[test]
     fn detect_unknown_host_returns_none() {
         let config = StackedConfig::with_defaults();
-        let result = detect_forge_from_host("gitlab.com", "/acme/widget.git".into(), &config);
+        let result = detect_forge_from_host("bitbucket.org", "/acme/widget.git".into(), &config);
         assert_eq!(result, None);
     }
 
@@ -468,7 +535,8 @@ mod tests {
 
     #[test]
     fn build_forge_for_type_unsupported() {
-        let result = build_forge_for_type("origin", "gitlab", "acme", "widget", "gitlab.com");
+        let result =
+            build_forge_for_type("origin", "gerrit", "acme", "widget", "review.example.com");
         let Err(err) = result else {
             panic!("expected an error for unsupported forge type");
         };
@@ -476,5 +544,49 @@ mod tests {
             err.to_string().contains("unsupported forge type"),
             "unexpected error: {err}"
         );
+    }
+
+    // -- GitLab detection --
+
+    #[test]
+    fn detect_gitlab_com() {
+        let config = StackedConfig::with_defaults();
+        let result = detect_forge_from_host("gitlab.com", "/acme/widget.git".into(), &config);
+        assert_eq!(
+            result,
+            Some(DetectedForge::GitLab {
+                group: "acme".into(),
+                project: "widget".into(),
+                base_url: None,
+            })
+        );
+    }
+
+    #[test]
+    fn detect_gitlab_com_ssh() {
+        let config = StackedConfig::with_defaults();
+        let result = detect_forge_from_host("gitlab.com", "acme/widget.git".into(), &config);
+        assert_eq!(
+            result,
+            Some(DetectedForge::GitLab {
+                group: "acme".into(),
+                project: "widget".into(),
+                base_url: None,
+            })
+        );
+    }
+
+    #[test]
+    fn detect_gitlab_com_with_invalid_path_returns_none() {
+        let config = StackedConfig::with_defaults();
+        assert_eq!(
+            detect_forge_from_host("gitlab.com", "/".into(), &config),
+            None
+        );
+    }
+
+    #[test]
+    fn forge_types_contains_gitlab() {
+        assert!(FORGE_TYPES.contains(&"gitlab"));
     }
 }

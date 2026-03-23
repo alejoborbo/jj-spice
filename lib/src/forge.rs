@@ -2,6 +2,8 @@
 pub mod detect;
 /// GitHub / GitHub Enterprise backend.
 pub mod github;
+/// GitLab backend.
+pub mod gitlab;
 
 use std::future::Future;
 use std::pin::Pin;
