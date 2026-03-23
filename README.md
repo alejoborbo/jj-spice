@@ -63,6 +63,20 @@ Pre-built binaries for Linux, macOS, and Windows are available on the
 
 ## Usage
 
+### Alias to use jj command directly
+
+Register jj aliases so that `jj-spice` commands can be invoked directly as `jj`
+subcommands.
+
+```bash
+jj-spice util install-aliases
+```
+
+After installation, the following shortcuts are available:
+
+- `jj stack <cmd>` instead of `jj-spice stack <cmd>`
+- `jj spice <cmd>` instead of `jj-spice <cmd>`
+
 ### `jj-spice stack log`
 
 Visualize the bookmark DAG with the status of each change request.

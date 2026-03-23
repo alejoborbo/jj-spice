@@ -4,6 +4,8 @@ pub mod cli;
 mod completion;
 /// Shared environment bootstrapped from the jj config and workspace.
 pub(crate) mod env;
+/// `util install-aliases` command implementation.
+mod install_aliases;
 /// `stack log` command implementation.
 mod stack_log;
 /// `stack submit` command implementation.
@@ -30,6 +32,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         SpiceCommand::Util(util_args) => match util_args.command {
             UtilCommand::Completion(args) => completion::run(args.shell),
+            UtilCommand::InstallAliases(args) => install_aliases::run(args.print),
         },
 
         SpiceCommand::Stack(stack_args) => {

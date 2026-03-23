@@ -124,6 +124,28 @@ pub enum UtilCommand {
     ///      source <(jj-spice util completion zsh)
     ///      ```
     Completion(CompletionArgs),
+
+    /// Register jj aliases so jj-spice commands can be invoked as jj
+    /// subcommands.
+    ///
+    /// By default this writes the aliases directly to the user-level jj
+    /// config file (`~/.config/jj/config.toml` or equivalent). Use `--print`
+    /// to preview the TOML snippet without modifying any file.
+    ///
+    /// The following aliases are installed:
+    ///
+    /// - `jj stack <cmd>` → `jj-spice stack <cmd>`
+    /// - `jj spice <cmd>` → `jj-spice <cmd>`
+    InstallAliases(InstallAliasesArgs),
+}
+
+/// Arguments for `jj-spice util install-aliases`.
+#[derive(Args, Clone, Debug)]
+pub struct InstallAliasesArgs {
+    /// Print the TOML snippet to stdout instead of writing to the jj config
+    /// file.
+    #[arg(long)]
+    pub print: bool,
 }
 
 /// Arguments for `jj-spice util completion`.
@@ -444,6 +466,32 @@ mod tests {
     fn parse_util_completion_invalid_shell_fails() {
         assert!(Cli::try_parse_from(["jj-spice", "util", "completion", "tcsh"]).is_err());
     }
+
+    // ---- Util install-aliases tests ----
+
+    #[test]
+    fn parse_util_install_aliases() {
+        let cli = Cli::try_parse_from(["jj-spice", "util", "install-aliases"]).unwrap();
+        match cli.command {
+            SpiceCommand::Util(UtilArgs {
+                command: UtilCommand::InstallAliases(args),
+            }) => assert!(!args.print),
+            _ => panic!("expected Util InstallAliases"),
+        }
+    }
+
+    #[test]
+    fn parse_util_install_aliases_print() {
+        let cli = Cli::try_parse_from(["jj-spice", "util", "install-aliases", "--print"]).unwrap();
+        match cli.command {
+            SpiceCommand::Util(UtilArgs {
+                command: UtilCommand::InstallAliases(args),
+            }) => assert!(args.print),
+            _ => panic!("expected Util InstallAliases"),
+        }
+    }
+
+    // ---- Completion script generation tests ----
 
     #[test]
     fn generate_completion_scripts_are_non_empty() {
