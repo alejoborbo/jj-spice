@@ -149,18 +149,19 @@ async fn post_stack_comments(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Build comment text + metadata for each bookmark in one pass.
     let comment_tasks: Vec<(String, ForgeMeta, String)> = graph
-        .iter_graph()
-        .unwrap()
+        .iter_graph()?
         .unique_by(|n| n.bookmark().name())
         .map(|n| {
             let bookmark = n.bookmark();
-            let meta = state.get(bookmark.name()).unwrap().clone();
-            let comment_text = Comment::new(bookmark, graph, state)
-                .to_string()
-                .expect("Failed to serialize comment");
-            (bookmark.name().to_string(), meta, comment_text)
+            let name = bookmark.name();
+            let meta = state
+                .get(name)
+                .ok_or_else(|| format!("no change request found for bookmark '{name}'"))?
+                .clone();
+            let comment_text = Comment::new(bookmark, graph, state).to_string()?;
+            Ok((name.to_string(), meta, comment_text))
         })
-        .collect();
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
 
     // Fire all comment API calls concurrently.
     let futures: Vec<_> = comment_tasks
@@ -172,7 +173,10 @@ async fn post_stack_comments(
     // Collect results and update state with comment IDs.
     for (result, (name, _, _)) in results.into_iter().zip(&comment_tasks) {
         let comment_id = result?;
-        let mut updated_meta = state.get(name).unwrap().clone();
+        let mut updated_meta = state
+            .get(name)
+            .ok_or_else(|| format!("no change request found for bookmark '{name}'"))?
+            .clone();
         updated_meta.set_comment_id(comment_id);
         state.set(name.clone(), updated_meta);
     }

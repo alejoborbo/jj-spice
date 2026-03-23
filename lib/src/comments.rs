@@ -69,12 +69,17 @@ impl<'a> Comment<'a> {
         };
 
         // A queue of bookmark, and the depth of the bookmark in the stack trace
-        let mut queue = Vec::from_iter(
-            self.graph
-                .root_bookmarks
-                .iter()
-                .map(|b| (self.change_requests.get(b).unwrap(), 0)),
-        );
+        let mut queue: Vec<(&ForgeMeta, usize)> = self
+            .graph
+            .root_bookmarks
+            .iter()
+            .map(|b| {
+                self.change_requests
+                    .get(b)
+                    .ok_or_else(|| CommentError::NoChangeRequestFound(b.clone()))
+                    .map(|meta| (meta, 0))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut visited = Vec::new();
 
         // Go through the bookmarks in a depth first order, and add comments to the change request
@@ -218,15 +223,16 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "None")]
-    fn missing_change_request_for_root_panics() {
+    fn missing_change_request_for_root_returns_error() {
         // root_bookmarks references "feat-a" but it's not in change_requests
         let bookmark = make_bookmark("feat-a");
         let graph = BookmarkGraph::for_testing(vec!["feat-a".into()], BTreeMap::new());
         let crs = ChangeRequests::default();
 
         let comment = Comment::new(&bookmark, &graph, &crs);
-        let _ = comment.to_string();
+        let err = comment.to_string().unwrap_err();
+
+        assert!(matches!(err, CommentError::NoChangeRequestFound(ref name) if name == "feat-a"));
     }
 
     #[test]
