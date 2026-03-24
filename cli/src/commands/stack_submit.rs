@@ -199,7 +199,7 @@ pub async fn run(
     }
 
     // Post stack-trace comments on all CRs concurrently.
-    post_stack_comments(forge, &graph, &mut state).await?;
+    post_stack_comments(forge, &graph, &mut state, trunk_name).await?;
 
     // Persist CRs and comment IDs to disk.
     cr_store.save(&state)?;
@@ -520,6 +520,7 @@ async fn post_stack_comments(
     forge: &dyn Forge,
     graph: &BookmarkGraph<'_>,
     state: &mut ChangeRequests,
+    trunk_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Build comment text + metadata for each bookmark in one pass.
     let comment_tasks: Vec<(String, ForgeMeta, String)> = graph
@@ -532,7 +533,9 @@ async fn post_stack_comments(
                 .get(name)
                 .ok_or_else(|| format!("no change request found for bookmark '{name}'"))?
                 .clone();
-            let comment_text = Comment::new(bookmark, graph, state).to_string()?;
+            let comment_text = Comment::new(bookmark, graph, state)
+                .with_trunk(trunk_name)
+                .to_string()?;
             Ok((name.to_string(), meta, comment_text))
         })
         .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
