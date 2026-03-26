@@ -1,6 +1,8 @@
 # jj-spice
 
-`jj-spice` manages stacked change requests in a [jj (Jujutsu)](https://github.com/jj-vcs/jj) repository.
+Submit, sync, and track stacked change requests in your [jj (Jujutsu)](https://github.com/jj-vcs/jj) repository without the busywork.
+
+Unlike a wrapper, `jj-spice` is a complement to `jj` and built directly on [jj-lib](https://crates.io/crates/jj-lib) for deep, native integration.
 
 Stacked change requests break a large change into a chain of small, reviewable
 PRs that depend on each other. `jj-spice` automates the tedious parts — creating
