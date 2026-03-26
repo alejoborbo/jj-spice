@@ -21,7 +21,10 @@ use jj_lib::revset::{
     RevsetParseContext, RevsetWorkspaceContext,
 };
 use jj_lib::settings::UserSettings;
-use jj_lib::workspace::{Workspace, default_working_copy_factories};
+use jj_lib::workspace::{
+    DefaultWorkspaceLoaderFactory, Workspace, WorkspaceLoaderFactory,
+    default_working_copy_factories,
+};
 
 use jj_spice_lib::forge::Forge;
 
@@ -340,9 +343,15 @@ fn load_config(
         root.to_owned()
     };
 
-    // Inject repo/workspace paths so per-repo config and revset aliases load.
-    config_env.reset_repo_path(&workspace_root.join(".jj").join("repo"));
-    config_env.reset_workspace_path(&workspace_root);
+    // Use jj-lib's workspace loader to resolve the actual repo directory.
+    // In non-default workspaces `.jj/repo` is a file containing a relative
+    // path to the shared repo, not a directory.  The loader follows the
+    // indirection so `repo_path()` always returns the real directory.
+    let loader = DefaultWorkspaceLoaderFactory
+        .create(&workspace_root)
+        .map_err(|e| format!("{e}"))?;
+    config_env.reset_repo_path(loader.repo_path());
+    config_env.reset_workspace_path(loader.workspace_root());
 
     // Temporary Ui for reload helpers (they may emit warnings).
     let tmp_config = config_env.resolve_config(&raw_config)?;
