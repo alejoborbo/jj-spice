@@ -2547,7 +2547,7 @@ dependencies = [
 
 [[package]]
 name = "jj-spice-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "clap",
@@ -2565,7 +2565,7 @@ dependencies = [
 
 [[package]]
 name = "jj-spice-lib"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "const_format",
  "gix",
