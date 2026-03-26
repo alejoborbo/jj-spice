@@ -1,12 +1,16 @@
+use std::collections::HashMap;
 use std::io::Write as _;
 
 use itertools::Itertools;
 use jj_cli::description_util::TextEditor;
 use jj_cli::git_util::{GitSubprocessUi, print_push_stats};
 use jj_lib::backend::CommitId;
+use jj_lib::commit::Commit;
 use jj_lib::git::{self, GitBranchPushTargets};
+use jj_lib::object_id::ObjectId;
 use jj_lib::ref_name::{RefNameBuf, RemoteNameBuf};
 use jj_lib::refs::{BookmarkPushAction, BookmarkPushUpdate, classify_bookmark_push_action};
+use jj_lib::signing::SignBehavior;
 use jj_spice_lib::bookmark::Bookmark;
 use jj_spice_lib::bookmark::graph::BookmarkGraph;
 use jj_spice_lib::comments::Comment;
@@ -43,7 +47,7 @@ pub async fn run(
         let ascendants = bookmark_node.ascendants();
 
         // Check for untracked changes in the bookmark and push them if the user agrees.
-        check_untracked_changes(&env.ui, env, bookmark)?;
+        check_untracked_changes(&env.ui, env, bookmark, bookmark_node.commits())?;
 
         // If the change request already exists, retarget if needed.
         let existing = get_existing_change_request(
@@ -205,6 +209,7 @@ fn check_untracked_changes(
     ui: &jj_cli::ui::Ui,
     env: &SpiceEnv,
     bookmark: &Bookmark,
+    commit_ids: &[CommitId],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let remote = env.get_default_remote();
     let local_remote_target = bookmark.remote_ref(&remote).ok_or_else(|| {
@@ -220,12 +225,16 @@ fn check_untracked_changes(
     match classify_bookmark_push_action(local_remote_target) {
         BookmarkPushAction::AlreadyMatches => {}
         BookmarkPushAction::Update(push_update) => {
+            // Validate commits are ready to push (description, author, conflicts).
+            // Returns commits that need signing.
+            let commits_to_sign = verify_commits(env, env.repo.as_ref(), commit_ids)?;
+
             writeln!(
                 ui.warning_default(),
                 "Untracked changes have been detected. Do you want to push them?",
             )?;
             if ui.prompt_yes_no("Push changes?", Some(true))? {
-                push_bookmarks(env, &remote, bookmark, push_update)?;
+                push_bookmarks(env, &remote, bookmark, push_update, commits_to_sign)?;
                 writeln!(
                     ui.stdout_formatter(),
                     "Pushed {} to {}",
@@ -315,17 +324,55 @@ async fn get_existing_change_request(
     }
 }
 
+/// Push a bookmark to the remote, signing unsigned commits first if needed.
+///
+/// Signing rewrites commits (producing new IDs), so the push target is
+/// remapped after signing. Both signing and pushing happen in the same
+/// transaction to keep the repo state consistent.
+///
+/// Mirrors jj's `sign_commits_before_push` + `push_branches` flow.
 fn push_bookmarks(
     env: &SpiceEnv,
     remote_name: &RemoteNameBuf,
     bookmark: &Bookmark,
-    push_update: BookmarkPushUpdate,
+    mut push_update: BookmarkPushUpdate,
+    commits_to_sign: Vec<Commit>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let mut tx = env.repo.start_transaction();
+
+    // Sign unsigned commits before pushing (if any).
+    if !commits_to_sign.is_empty() {
+        let commit_ids: Vec<CommitId> = commits_to_sign.iter().map(|c| c.id().clone()).collect();
+        let mut old_to_new: HashMap<CommitId, CommitId> = HashMap::new();
+
+        tx.repo_mut()
+            .transform_descendants(commit_ids.clone(), async |rewriter| {
+                let old_id = rewriter.old_commit().id().clone();
+                let new_commit: Commit = rewriter
+                    .reparent()
+                    .set_sign_behavior(SignBehavior::Own)
+                    .write()?;
+                old_to_new.insert(old_id, new_commit.id().clone());
+                Ok(())
+            })?;
+
+        // Remap push target to the newly signed commit ID.
+        if let Some(old_target) = &push_update.new_target
+            && let Some(new_id) = old_to_new.get(old_target)
+        {
+            push_update.new_target = Some(new_id.clone());
+        }
+
+        writeln!(
+            env.ui.status(),
+            "Signed {} commit(s)",
+            commits_to_sign.len()
+        )?;
+    }
+
     let targets = GitBranchPushTargets {
         branch_updates: vec![(RefNameBuf::from(bookmark.name()), push_update)],
     };
-
-    let mut tx = env.repo.start_transaction();
     let push_stats = git::push_branches(
         tx.repo_mut(),
         env.git_settings.to_subprocess_options(),
@@ -340,6 +387,69 @@ fn push_bookmarks(
     } else {
         Err("Failed to push some bookmarks".into())
     }
+}
+
+/// Verify commits before pushing them.
+///
+/// Checks that all commits are ready to push: non-empty description,
+/// author/committer set, and no unresolved conflicts. If `git.sign-on-push`
+/// is configured, collects unsigned commits that need signing.
+///
+/// Mirrors jj's `validate_commits_ready_to_push`.
+fn verify_commits(
+    env: &SpiceEnv,
+    repo: &dyn jj_lib::repo::Repo,
+    commit_ids: &[CommitId],
+) -> Result<Vec<Commit>, Box<dyn std::error::Error>> {
+    let sign_on_push = env
+        .settings
+        .get_bool(["git", "sign-on-push"])
+        .unwrap_or(false);
+    let sign_settings = if sign_on_push {
+        Some(env.settings.sign_settings())
+    } else {
+        None
+    };
+
+    let mut commits_to_sign = vec![];
+
+    for id in commit_ids {
+        let commit = repo.store().get_commit(id)?;
+        let mut reasons = vec![];
+
+        if commit.description().is_empty() {
+            reasons.push("it has no description");
+        }
+        if commit.author().name.is_empty()
+            || commit.author().email.is_empty()
+            || commit.committer().name.is_empty()
+            || commit.committer().email.is_empty()
+        {
+            reasons.push("it has no author and/or committer set");
+        }
+        if commit.has_conflict() {
+            reasons.push("it has conflicts");
+        }
+
+        if !reasons.is_empty() {
+            return Err(format!(
+                "Won't push commit {} since {}",
+                &id.hex()[..12],
+                reasons.join(" and ")
+            )
+            .into());
+        }
+
+        // Collect commits that need signing before push.
+        if let Some(ref settings) = sign_settings
+            && !commit.is_signed()
+            && settings.should_sign(commit.store_commit())
+        {
+            commits_to_sign.push(commit);
+        }
+    }
+
+    Ok(commits_to_sign)
 }
 
 /// Build a suggested title and body for a change request from commit
