@@ -225,6 +225,16 @@ impl<'a> BookmarkGraph<'a> {
         self.descendants.get(name).cloned().unwrap_or_default()
     }
 
+    /// Look up a bookmark node by name.
+    pub fn get_node(&self, name: &str) -> Option<&BookmarkNode<'a>> {
+        self.nodes.get(name)
+    }
+
+    /// Names of root bookmarks (those with no parent bookmark in the graph).
+    pub fn root_bookmarks(&self) -> &[String] {
+        &self.root_bookmarks
+    }
+
     /// Iterate bookmarks in topological order (roots first).
     pub fn iter_graph(
         &self,
@@ -1067,5 +1077,78 @@ mod tests {
         assert_eq!(c_desc, vec!["feat-d"]);
         assert!(!descendants.contains_key("feat-b"));
         assert!(!descendants.contains_key("feat-d"));
+    }
+
+    // -- Public accessor tests --
+
+    #[test]
+    fn get_node_returns_existing_node() {
+        let a = commit_id(1);
+        let reversed: Vec<GraphNode<CommitId>> = vec![(a.clone(), vec![])];
+        let bookmarks = bookmark_map(vec![(a.clone(), vec!["feat"])]);
+
+        let (nodes, edges, descendants) =
+            BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+        let head_bookmarks = BookmarkGraph::find_head_bookmarks(&edges);
+        let root_bookmarks = BookmarkGraph::find_root_bookmarks(&nodes);
+        let graph = BookmarkGraph {
+            nodes,
+            edges,
+            descendants,
+            head_bookmarks,
+            root_bookmarks,
+        };
+
+        assert!(graph.get_node("feat").is_some());
+        assert_eq!(graph.get_node("feat").unwrap().name(), "feat");
+    }
+
+    #[test]
+    fn get_node_returns_none_for_missing() {
+        let a = commit_id(1);
+        let reversed: Vec<GraphNode<CommitId>> = vec![(a.clone(), vec![])];
+        let bookmarks = bookmark_map(vec![(a.clone(), vec!["feat"])]);
+
+        let (nodes, edges, descendants) =
+            BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+        let head_bookmarks = BookmarkGraph::find_head_bookmarks(&edges);
+        let root_bookmarks = BookmarkGraph::find_root_bookmarks(&nodes);
+        let graph = BookmarkGraph {
+            nodes,
+            edges,
+            descendants,
+            head_bookmarks,
+            root_bookmarks,
+        };
+
+        assert!(graph.get_node("nonexistent").is_none());
+    }
+
+    #[test]
+    fn root_bookmarks_accessor_matches_find_root_bookmarks() {
+        let a = commit_id(1);
+        let b = commit_id(2);
+        let reversed: Vec<GraphNode<CommitId>> = vec![
+            (a.clone(), vec![GraphEdge::direct(b.clone())]),
+            (b.clone(), vec![]),
+        ];
+        let bookmarks = bookmark_map(vec![(a.clone(), vec!["head"]), (b.clone(), vec!["base"])]);
+
+        let (nodes, edges, descendants) =
+            BookmarkGraph::build_bookmark_graph(&reversed, &bookmarks);
+        let head_bookmarks = BookmarkGraph::find_head_bookmarks(&edges);
+        let root_bookmarks = BookmarkGraph::find_root_bookmarks(&nodes);
+        let expected = root_bookmarks.clone();
+        let graph = BookmarkGraph {
+            nodes,
+            edges,
+            descendants,
+            head_bookmarks,
+            root_bookmarks,
+        };
+
+        assert_eq!(graph.root_bookmarks(), &expected[..]);
+        // "base" has "head" as ascendant, so only "head" is a root.
+        assert_eq!(graph.root_bookmarks(), &["head"]);
     }
 }
