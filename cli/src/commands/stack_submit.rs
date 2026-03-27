@@ -405,8 +405,13 @@ fn verify_commits(
         .settings
         .get_bool(["git", "sign-on-push"])
         .unwrap_or(false);
+    // Override behavior to Own so commits authored by us are signed before
+    // push, regardless of the configured signing.behavior (which may be Drop
+    // for normal operations). Mirrors jj's own git push flow.
     let sign_settings = if sign_on_push {
-        Some(env.settings.sign_settings())
+        let mut settings = env.settings.sign_settings();
+        settings.behavior = SignBehavior::Own;
+        Some(settings)
     } else {
         None
     };
@@ -512,6 +517,103 @@ fn build_cr_suggestion(
 
 #[cfg(test)]
 mod tests {
+    use jj_lib::backend::{
+        ChangeId, Commit, MillisSinceEpoch, SecureSig, Signature, Timestamp, TreeId,
+    };
+    use jj_lib::merge::Merge;
+    use jj_lib::settings::SignSettings;
+    use jj_lib::signing::SignBehavior;
+
+    /// Build a minimal `backend::Commit` for sign-settings tests.
+    fn make_commit(email: &str, signed: bool) -> Commit {
+        let ts = Timestamp {
+            timestamp: MillisSinceEpoch(0),
+            tz_offset: 0,
+        };
+        let sig = Signature {
+            name: "Test".into(),
+            email: email.into(),
+            timestamp: ts,
+        };
+        Commit {
+            parents: vec![],
+            predecessors: vec![],
+            root_tree: Merge::resolved(TreeId::new(vec![0])),
+            conflict_labels: Merge::resolved(String::new()),
+            change_id: ChangeId::new(vec![0]),
+            description: "test commit".into(),
+            author: sig.clone(),
+            committer: sig,
+            secure_sig: if signed {
+                Some(SecureSig {
+                    data: vec![],
+                    sig: vec![],
+                })
+            } else {
+                None
+            },
+        }
+    }
+
+    fn sign_settings(behavior: SignBehavior, email: &str) -> SignSettings {
+        SignSettings {
+            behavior,
+            user_email: email.into(),
+            key: None,
+        }
+    }
+
+    // -- sign-on-push behavior override tests --------------------------------
+
+    #[test]
+    fn drop_behavior_never_signs() {
+        let settings = sign_settings(SignBehavior::Drop, "me@example.com");
+        let commit = make_commit("me@example.com", false);
+        assert!(!settings.should_sign(&commit));
+    }
+
+    #[test]
+    fn own_behavior_signs_own_unsigned_commit() {
+        let settings = sign_settings(SignBehavior::Own, "me@example.com");
+        let commit = make_commit("me@example.com", false);
+        assert!(settings.should_sign(&commit));
+    }
+
+    #[test]
+    fn own_behavior_skips_other_author() {
+        let settings = sign_settings(SignBehavior::Own, "me@example.com");
+        let commit = make_commit("other@example.com", false);
+        assert!(!settings.should_sign(&commit));
+    }
+
+    #[test]
+    fn own_behavior_re_signs_already_signed_own_commit() {
+        let settings = sign_settings(SignBehavior::Own, "me@example.com");
+        let commit = make_commit("me@example.com", true);
+        assert!(settings.should_sign(&commit));
+    }
+
+    #[test]
+    fn keep_behavior_only_signs_already_signed_own_commit() {
+        let settings = sign_settings(SignBehavior::Keep, "me@example.com");
+        // Unsigned own commit — should NOT sign.
+        assert!(!settings.should_sign(&make_commit("me@example.com", false)));
+        // Signed own commit — should sign (preserve).
+        assert!(settings.should_sign(&make_commit("me@example.com", true)));
+        // Signed other commit — should NOT sign.
+        assert!(!settings.should_sign(&make_commit("other@example.com", true)));
+    }
+
+    #[test]
+    fn force_behavior_always_signs() {
+        let settings = sign_settings(SignBehavior::Force, "me@example.com");
+        assert!(settings.should_sign(&make_commit("me@example.com", false)));
+        assert!(settings.should_sign(&make_commit("other@example.com", false)));
+        assert!(settings.should_sign(&make_commit("other@example.com", true)));
+    }
+
+    // -- suggestion tests ----------------------------------------------------
+
     /// Helper that exercises the suggestion-building logic without a real repo
     /// by testing the pure string-processing portion directly.
     fn suggestion_from_descriptions(descriptions: &[&str]) -> (String, String) {
