@@ -280,9 +280,11 @@ fn render_graph(
         }
     }
 
-    // Write the fully rendered graph to actual stdout.
-    std::io::stdout().write_all(&stdout_buf)?;
-    std::io::stdout().flush()?;
+    // Write through the Ui's pager-aware stdout so the output is
+    // displayed in the configured pager when running interactively.
+    let mut stdout = env.ui.stdout();
+    stdout.write_all(&stdout_buf)?;
+    stdout.flush()?;
     Ok(())
 }
 

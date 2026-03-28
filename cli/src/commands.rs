@@ -36,7 +36,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         },
 
         SpiceCommand::Stack(stack_args) => {
-            let env = SpiceEnv::init(&global_args)?;
+            let mut env = SpiceEnv::init(&global_args)?;
 
             let trunk_rev = RevisionArg::from("trunk()".to_string());
             let trunk = env.resolve_single_rev(&trunk_rev).map_err(|_| {
@@ -50,7 +50,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
             match stack_args.command {
                 StackCommand::Log(log_args) => {
-                    rt.block_on(stack_log::run(&env, &trunk, log_args.revisions.as_deref()))
+                    env.ui.request_pager();
+                    let result =
+                        rt.block_on(stack_log::run(&env, &trunk, log_args.revisions.as_deref()));
+                    env.ui.finalize_pager();
+                    result
                 }
                 StackCommand::Submit(submit_args) => {
                     let head = env
