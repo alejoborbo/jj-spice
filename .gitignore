@@ -30,3 +30,6 @@ target
 # Added by cargo
 
 /target
+
+# Build files from Mkdocs
+site/

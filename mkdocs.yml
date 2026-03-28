@@ -1,0 +1,8 @@
+site_name: jj-spice
+site_url: https://alejoborbo.github.io/jj-spice
+theme:
+  name: material
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation and Setup: installation-and-setup.md
