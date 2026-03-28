@@ -2,6 +2,10 @@ site_name: jj-spice
 site_url: https://alejoborbo.github.io/jj-spice
 theme:
   name: material
+extra:
+  analytics:
+    provider: google
+    property: G-WFM9GL0JQ4
 nav:
   - Home: index.md
   - Getting Started:
