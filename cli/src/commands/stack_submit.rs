@@ -46,14 +46,15 @@ pub async fn run(
         let bookmark = bookmark_node.bookmark();
         let ascendants = bookmark_node.ascendants();
 
+        let auto_accept =
+            if let Ok(auto_accept) = env.config().get::<bool>(["spice", "auto-accept-changes"]) {
+                auto_accept
+            } else {
+                args.auto_accept
+            };
+
         // Check for untracked changes in the bookmark and push them if the user agrees.
-        check_untracked_changes(
-            &env.ui,
-            env,
-            bookmark,
-            bookmark_node.commits(),
-            args.auto_accept,
-        )?;
+        check_untracked_changes(&env.ui, env, bookmark, bookmark_node.commits(), auto_accept)?;
 
         // If the change request already exists, retarget if needed.
         let existing = get_existing_change_request(
