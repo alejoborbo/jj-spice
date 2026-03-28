@@ -1,10 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 
+use jj_cli::git_util::GitSubprocessUi;
 use jj_cli::ui::Ui;
 use jj_lib::backend::CommitId;
 use jj_lib::config::{ConfigFile, ConfigSource};
+use jj_lib::git::{GitFetch, GitFetchRefExpression, GitImportOptions, expand_fetch_refspecs};
+use jj_lib::ref_name::RemoteName;
 use jj_lib::repo::Repo;
+use jj_lib::str_util::{StringExpression, StringPattern};
 use jj_spice_lib::bookmark::Bookmark;
 use jj_spice_lib::bookmark::graph::{BookmarkGraph, BookmarkNode};
 use jj_spice_lib::forge::Forge;
@@ -45,6 +49,7 @@ pub async fn run(
     env: &SpiceEnv,
     trunk: &CommitId,
     head: &CommitId,
+    trunk_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let graph = BookmarkGraph::build_active_graph(env.repo.as_ref(), trunk, head)?;
     let DetectionResult {
@@ -55,12 +60,14 @@ pub async fn run(
     // Prompt for unmatched remotes (grouped by hostname).
     resolve_unmatched_remotes(env, &unmatched, &mut forges)?;
 
+    // Fetch the latest remote changes for the trunk branch.
+    fetch_trunk(env, trunk_name)?;
+
     let spice_store = SpiceStore::init_at(env.workspace.repo_path())?;
     let cr_store = ChangeRequestStore::new(&spice_store);
     let mut state = cr_store.load()?;
 
     let nodes: Vec<&BookmarkNode> = graph.iter_graph()?.collect();
-
     for node in &nodes {
         let bookmark = node.bookmark();
         let name = node.name();
@@ -170,6 +177,70 @@ fn resolve_unmatched_remotes(
             forges.insert(remote.remote_name.clone(), forge);
         }
     }
+
+    Ok(())
+}
+
+/// Fetch the latest remote changes for trunk
+fn fetch_trunk(env: &SpiceEnv, trunk_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Get all trunk remotes.
+    let trunk_remotes: Vec<&RemoteName> = env
+        .repo
+        .view()
+        .bookmarks()
+        .filter(|(ref_name, _)| ref_name.as_str() == trunk_name)
+        .flat_map(|(_, ref_target)| {
+            ref_target
+                .remote_refs
+                .iter()
+                .filter_map(|(remote_name, remote_ref)| {
+                    // Exclude the "git" remote, which is used for internal tracking.
+                    if !remote_ref.is_tracked() || *remote_name == "git" {
+                        return None;
+                    }
+                    Some(*remote_name)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    // Build the fetch refspecs that are used to fetch the latest changes
+    let mut fetch_refs = HashMap::new();
+    for remote_name in &trunk_remotes {
+        let expr = GitFetchRefExpression {
+            bookmark: StringExpression::Pattern(Box::new(StringPattern::Exact(
+                trunk_name.to_string(),
+            ))),
+            tag: StringExpression::none(),
+        };
+        fetch_refs.insert(*remote_name, expand_fetch_refspecs(remote_name, expr)?);
+    }
+
+    let mut tx = env.repo.start_transaction();
+    let import_options = GitImportOptions {
+        auto_local_bookmark: env.git_settings.auto_local_bookmark,
+        abandon_unreachable_commits: env.git_settings.abandon_unreachable_commits,
+        remote_auto_track_bookmarks: HashMap::new(),
+    };
+    let mut git_fetch = GitFetch::new(
+        tx.repo_mut(),
+        env.git_settings.to_subprocess_options(),
+        &import_options,
+    )?;
+
+    // Fetch changes from each remote
+    for (remote_name, expanded_fetch_refspecs) in fetch_refs {
+        let mut callback = GitSubprocessUi::new(&env.ui);
+        git_fetch.fetch(
+            remote_name,
+            expanded_fetch_refspecs,
+            &mut callback,
+            None,
+            None,
+        )?;
+    }
+
+    tx.commit("fetch trunk")?;
 
     Ok(())
 }

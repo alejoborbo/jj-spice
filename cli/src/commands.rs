@@ -46,6 +46,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                  'trunk()' = 'main@origin'"
             })?;
 
+            let trunk_name = env
+                .repo
+                .view()
+                .bookmarks()
+                .find(|(_, target)| target.local_target.as_normal() == Some(&trunk))
+                .map(|(name, _)| name.as_str().to_string())
+                .ok_or("no bookmark found at trunk commit")?;
+
             let rt = tokio::runtime::Runtime::new()?;
 
             match stack_args.command {
@@ -62,14 +70,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         .map_err(|e| format!("failed to resolve @: {e}"))?;
                     rt.block_on(async {
                         let detection = detect_forges(env.repo.store(), env.config())?;
-
-                        let trunk_name = env
-                            .repo
-                            .view()
-                            .bookmarks()
-                            .find(|(_, target)| target.local_target.as_normal() == Some(&trunk))
-                            .map(|(name, _)| name.as_str().to_string())
-                            .ok_or("no bookmark found at trunk commit")?;
 
                         let (forge, source_repo) = env.resolve_forge(detection.forges)?;
 
@@ -89,7 +89,13 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     let head = env
                         .resolve_single_rev(&RevisionArg::AT)
                         .map_err(|e| format!("failed to resolve @: {e}"))?;
-                    rt.block_on(stack_sync::run(&sync_args, &env, &trunk, &head))
+                    rt.block_on(stack_sync::run(
+                        &sync_args,
+                        &env,
+                        &trunk,
+                        &head,
+                        &trunk_name,
+                    ))
                 }
             }
         }
