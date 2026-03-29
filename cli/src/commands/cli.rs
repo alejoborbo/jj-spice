@@ -77,6 +77,12 @@ pub struct SubmitArgs {
     /// By default, jj-spice will only track change requests that are open, or in draft.
     #[arg(long, default_value_t = false)]
     pub allow_inactive: bool,
+    /// Auto accepts pushing untracked changes.
+    ///
+    /// By default, the user will be prompted if some changes are untracked.
+    /// If the --auto-accept flag is passed, untracked changes will be automatically pushed.
+    #[arg(long)]
+    pub auto_accept: bool,
 }
 
 /// Arguments for `jj-spice stack sync`.

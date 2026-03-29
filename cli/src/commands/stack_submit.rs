@@ -47,7 +47,13 @@ pub async fn run(
         let ascendants = bookmark_node.ascendants();
 
         // Check for untracked changes in the bookmark and push them if the user agrees.
-        check_untracked_changes(&env.ui, env, bookmark, bookmark_node.commits())?;
+        check_untracked_changes(
+            &env.ui,
+            env,
+            bookmark,
+            bookmark_node.commits(),
+            args.auto_accept,
+        )?;
 
         // If the change request already exists, retarget if needed.
         let existing = get_existing_change_request(
@@ -210,6 +216,7 @@ fn check_untracked_changes(
     env: &SpiceEnv,
     bookmark: &Bookmark,
     commit_ids: &[CommitId],
+    auto_accept: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let remote = env.get_default_remote();
     let local_remote_target = bookmark.remote_ref(&remote).ok_or_else(|| {
@@ -231,9 +238,23 @@ fn check_untracked_changes(
 
             writeln!(
                 ui.warning_default(),
-                "Untracked changes have been detected. Do you want to push them?",
+                "Untracked changes have been detected.",
             )?;
-            if ui.prompt_yes_no("Push changes?", Some(true))? {
+            let should_push = if auto_accept {
+                writeln!(
+                    ui.stdout_formatter(),
+                    "Auto accept is enabled, pushing commits to {}",
+                    remote.as_str(),
+                )?;
+                true
+            } else {
+                ui.prompt_yes_no(
+                    &format!("Do you want to push them to {}?", remote.as_str(),),
+                    Some(true),
+                )?
+            };
+
+            if should_push {
                 push_bookmarks(env, &remote, bookmark, push_update, commits_to_sign)?;
                 writeln!(
                     ui.stdout_formatter(),
