@@ -83,6 +83,11 @@ pub struct SubmitArgs {
     /// If the --auto-accept flag is passed, untracked changes will be automatically pushed.
     #[arg(long)]
     pub auto_accept: bool,
+    /// Auto track bookmarks
+    ///
+    /// When a bookmark has no remote, allow them to be tracked directly when submitting changes.
+    #[arg(long)]
+    pub auto_track_bookmarks: bool,
 }
 
 /// Arguments for `jj-spice stack sync`.

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::Write as _;
+use std::sync::Arc;
 
 use itertools::Itertools;
 use jj_cli::description_util::TextEditor;
@@ -8,8 +9,11 @@ use jj_lib::backend::CommitId;
 use jj_lib::commit::Commit;
 use jj_lib::git::{self, GitBranchPushTargets};
 use jj_lib::object_id::ObjectId;
-use jj_lib::ref_name::{RefNameBuf, RemoteNameBuf};
-use jj_lib::refs::{BookmarkPushAction, BookmarkPushUpdate, classify_bookmark_push_action};
+use jj_lib::ref_name::{RefName, RefNameBuf, RemoteNameBuf};
+use jj_lib::refs::{
+    BookmarkPushAction, BookmarkPushUpdate, LocalAndRemoteRef, classify_bookmark_push_action,
+};
+use jj_lib::repo::ReadonlyRepo;
 use jj_lib::signing::SignBehavior;
 use jj_spice_lib::bookmark::Bookmark;
 use jj_spice_lib::bookmark::graph::BookmarkGraph;
@@ -54,7 +58,14 @@ pub async fn run(
             };
 
         // Check for untracked changes in the bookmark and push them if the user agrees.
-        check_untracked_changes(&env.ui, env, bookmark, bookmark_node.commits(), auto_accept)?;
+        check_untracked_changes(
+            &env.ui,
+            env,
+            bookmark,
+            bookmark_node.commits(),
+            auto_accept,
+            args.auto_track_bookmarks,
+        )?;
 
         // If the change request already exists, retarget if needed.
         let existing = get_existing_change_request(
@@ -218,18 +229,70 @@ fn check_untracked_changes(
     bookmark: &Bookmark,
     commit_ids: &[CommitId],
     auto_accept: bool,
+    auto_track_bookmark: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let remote = env.get_default_remote();
-    let local_remote_target = bookmark.remote_ref(&remote).ok_or_else(|| {
-        let _ = writeln!(
+
+    // Fast path: remote ref already exists on the original bookmark.
+    if let Some(local_remote_target) = bookmark.remote_ref(&remote) {
+        return push_if_needed(
+            ui,
+            env,
+            bookmark,
+            commit_ids,
+            auto_accept,
+            &remote,
+            local_remote_target,
+        );
+    }
+
+    if !auto_track_bookmark {
+        writeln!(
             ui.hint_default(),
             "No remote ref found for bookmark {name}. Run `jj bookmark track {name} --remote={remote}` to \
              track it.",
             name = bookmark.name(),
             remote = remote.as_symbol(),
-        );
-        format!("No remote ref found for bookmark {}", bookmark.name())
+        )?;
+        return Err(format!("No remote ref found for bookmark {}", bookmark.name()).into());
+    }
+
+    // Track the bookmark and reload it from the updated repo.
+    let new_repo = track_bookmark(env, bookmark)?;
+    let (_, ref_target) = new_repo
+        .view()
+        .bookmarks()
+        .find(|(ref_name, _)| ref_name.as_str() == bookmark.name())
+        .ok_or_else(|| format!("bookmark '{}' not found after tracking", bookmark.name()))?;
+    let new_bookmark = Bookmark::new(bookmark.name().to_string(), ref_target);
+    let local_remote_target = new_bookmark.remote_ref(&remote).ok_or_else(|| {
+        format!(
+            "no remote ref for bookmark '{}' after tracking",
+            bookmark.name()
+        )
     })?;
+
+    push_if_needed(
+        ui,
+        env,
+        bookmark,
+        commit_ids,
+        auto_accept,
+        &remote,
+        local_remote_target,
+    )
+}
+
+/// Classify the push action for a bookmark and push if there are untracked changes.
+fn push_if_needed(
+    ui: &jj_cli::ui::Ui,
+    env: &SpiceEnv,
+    bookmark: &Bookmark,
+    commit_ids: &[CommitId],
+    auto_accept: bool,
+    remote: &RemoteNameBuf,
+    local_remote_target: LocalAndRemoteRef<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
     match classify_bookmark_push_action(local_remote_target) {
         BookmarkPushAction::AlreadyMatches => {}
         BookmarkPushAction::Update(push_update) => {
@@ -250,13 +313,13 @@ fn check_untracked_changes(
                 true
             } else {
                 ui.prompt_yes_no(
-                    &format!("Do you want to push them to {}?", remote.as_str(),),
+                    &format!("Do you want to push them to {}?", remote.as_str()),
                     Some(true),
                 )?
             };
 
             if should_push {
-                push_bookmarks(env, &remote, bookmark, push_update, commits_to_sign)?;
+                push_bookmarks(env, remote, bookmark, push_update, commits_to_sign)?;
                 writeln!(
                     ui.stdout_formatter(),
                     "Pushed {} to {}",
@@ -477,6 +540,39 @@ fn verify_commits(
     }
 
     Ok(commits_to_sign)
+}
+
+/// Track bookmark and return the updated repo.
+///
+/// Should be used when the --auto-track-bookmarks flag is set
+fn track_bookmark(
+    env: &SpiceEnv,
+    bookmark: &Bookmark,
+) -> Result<Arc<ReadonlyRepo>, Box<dyn std::error::Error>> {
+    let mut tx = env.repo.start_transaction();
+    let symbols: Vec<_> = env
+        .repo
+        .view()
+        .remote_views()
+        .filter_map(|(remote, remote_view)| {
+            // TODO: Store bookmark name as RefNameBuf to avoid doing this operations
+            let remote_bookmarks: Vec<_> = remote_view
+                .bookmarks
+                .keys()
+                .map(|ref_name| ref_name.as_str())
+                .collect();
+            if remote_bookmarks.contains(&bookmark.name()) {
+                return None;
+            }
+
+            Some(RefName::new(bookmark.name()).to_remote_symbol(remote))
+        })
+        .collect();
+
+    for symbol in symbols {
+        tx.repo_mut().track_remote_bookmark(symbol)?;
+    }
+    Ok(tx.commit(format!("tracked bookmark {}", bookmark.name()))?)
 }
 
 /// Build a suggested title and body for a change request from commit
