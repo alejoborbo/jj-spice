@@ -11,6 +11,7 @@ impl ForgeMeta {
     pub fn target_branch(&self) -> Option<&str> {
         match &self.forge {
             Some(ForgeOneof::Github(gh)) => Some(&gh.target_branch),
+            Some(ForgeOneof::Gitlab(gl)) => Some(&gl.target_branch),
             None => None,
         }
     }
@@ -19,6 +20,7 @@ impl ForgeMeta {
     pub fn source_branch(&self) -> Option<&str> {
         match &self.forge {
             Some(ForgeOneof::Github(gh)) => Some(&gh.source_branch),
+            Some(ForgeOneof::Gitlab(gl)) => Some(&gl.source_branch),
             None => None,
         }
     }
@@ -31,6 +33,7 @@ impl ForgeMeta {
     pub fn target_repo(&self) -> Option<&str> {
         match &self.forge {
             Some(ForgeOneof::Github(gh)) if !gh.target_repo.is_empty() => Some(&gh.target_repo),
+            // GitLab uses project IDs, not repo path strings for cross-repo.
             _ => None,
         }
     }
@@ -39,6 +42,7 @@ impl ForgeMeta {
     pub fn comment_id(&self) -> Option<u64> {
         match &self.forge {
             Some(ForgeOneof::Github(gh)) => gh.comment_id,
+            Some(ForgeOneof::Gitlab(gl)) => gl.comment_id,
             None => None,
         }
     }
@@ -47,6 +51,7 @@ impl ForgeMeta {
     pub fn set_comment_id(&mut self, id: u64) {
         match &mut self.forge {
             Some(ForgeOneof::Github(gh)) => gh.comment_id = Some(id),
+            Some(ForgeOneof::Gitlab(gl)) => gl.comment_id = Some(id),
             None => {}
         }
     }
@@ -60,6 +65,13 @@ impl fmt::Display for ForgeMeta {
                     f,
                     "GitHub PR #{} ({} → {})",
                     gh.number, gh.source_branch, gh.target_branch
+                )
+            }
+            Some(ForgeOneof::Gitlab(gl)) => {
+                write!(
+                    f,
+                    "GitLab MR !{} ({} → {})",
+                    gl.iid, gl.source_branch, gl.target_branch
                 )
             }
             None => write!(f, "unknown forge"),

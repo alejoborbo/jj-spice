@@ -122,7 +122,8 @@ impl<'a> Comment<'a> {
     fn forge_meta_id(&self, meta: &ForgeMeta) -> Option<String> {
         match &meta.forge {
             Some(Forge::Github(gh)) => Some(format!("#{}", gh.number)),
-            _ => None,
+            Some(Forge::Gitlab(gl)) => Some(format!("!{}", gl.iid)),
+            None => None,
         }
     }
 }
