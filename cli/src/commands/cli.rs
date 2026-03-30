@@ -99,6 +99,11 @@ pub struct SyncArgs {
     /// By default, jj-spice will only track change requests that are open, or in draft.
     #[arg(long, default_value_t = false)]
     pub allow_inactive: bool,
+    /// Restack the current stack onto trunk.
+    ///
+    /// By default, latest version of the trunk is fetched, but the stack is not rebased.
+    #[arg(long)]
+    pub restack: bool,
 }
 
 /// Arguments for the `util` subcommand group.

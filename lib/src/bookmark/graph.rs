@@ -94,8 +94,8 @@ pub struct BookmarkGraph<'a> {
     /// This ordering feeds into [`Self::iter_graph`] via `topo_order_forward`,
     /// which uses a DFS with no tie-breaking. A stable starting order ensures
     /// the graph layout is identical across runs.
-    pub(crate) head_bookmarks: Vec<String>,
-    pub(crate) root_bookmarks: Vec<String>,
+    pub head_bookmarks: Vec<String>,
+    pub root_bookmarks: Vec<String>,
 }
 
 impl<'a> BookmarkGraph<'a> {

@@ -1,13 +1,18 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
+use std::sync::Arc;
 
 use jj_cli::git_util::GitSubprocessUi;
 use jj_cli::ui::Ui;
 use jj_lib::backend::CommitId;
 use jj_lib::config::{ConfigFile, ConfigSource};
 use jj_lib::git::{GitFetch, GitFetchRefExpression, GitImportOptions, expand_fetch_refspecs};
-use jj_lib::ref_name::RemoteName;
-use jj_lib::repo::Repo;
+use jj_lib::ref_name::{RefName, RemoteName};
+use jj_lib::repo::{ReadonlyRepo, Repo};
+use jj_lib::revset::ResolvedRevsetExpression;
+use jj_lib::rewrite::{
+    MoveCommitsLocation, MoveCommitsStats, MoveCommitsTarget, RebaseOptions, move_commits,
+};
 use jj_lib::str_util::{StringExpression, StringPattern};
 use jj_spice_lib::bookmark::Bookmark;
 use jj_spice_lib::bookmark::graph::{BookmarkGraph, BookmarkNode};
@@ -51,7 +56,6 @@ pub async fn run(
     head: &CommitId,
     trunk_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let graph = BookmarkGraph::build_active_graph(env.repo.as_ref(), trunk, head)?;
     let DetectionResult {
         mut forges,
         unmatched,
@@ -62,6 +66,24 @@ pub async fn run(
 
     // Fetch the latest remote changes for the trunk branch.
     fetch_trunk(env, trunk_name)?;
+
+    // Build the bookmark graph. If the `--restack` flag is specified, rebase the
+    // stack onto trunk first, then build the graph from the updated repo state.
+    let _restacked_repo: Option<Arc<ReadonlyRepo>>;
+    let graph;
+    if args.restack {
+        let initial_graph = BookmarkGraph::build_active_graph(env.repo.as_ref(), trunk, head)?;
+        let root_bookmarks = initial_graph.root_bookmarks.clone();
+        _restacked_repo = Some(restack_graph(env, &root_bookmarks, trunk)?);
+        graph = BookmarkGraph::build_active_graph(
+            _restacked_repo.as_ref().unwrap().as_ref(),
+            trunk,
+            head,
+        )?;
+    } else {
+        _restacked_repo = None;
+        graph = BookmarkGraph::build_active_graph(env.repo.as_ref(), trunk, head)?;
+    }
 
     let spice_store = SpiceStore::init_at(env.workspace.repo_path())?;
     let cr_store = ChangeRequestStore::new(&spice_store);
@@ -242,6 +264,89 @@ fn fetch_trunk(env: &SpiceEnv, trunk_name: &str) -> Result<(), Box<dyn std::erro
 
     tx.commit("fetch trunk")?;
 
+    Ok(())
+}
+
+/// Restack the bookmark graph on top of the trunk branch.
+/// Returns the updated repo so the caller can build a fresh graph from the new state.
+fn restack_graph(
+    env: &SpiceEnv,
+    root_bookmarks: &[String],
+    trunk: &CommitId,
+) -> Result<Arc<ReadonlyRepo>, Box<dyn std::error::Error>> {
+    // Collect the tip commit IDs of all root bookmarks.
+    let view = env.repo.view();
+    let mut root_tip_ids = Vec::with_capacity(root_bookmarks.len());
+    for bookmark in root_bookmarks {
+        let commit_id = view
+            .get_local_bookmark(RefName::new(bookmark.as_str()))
+            .as_normal()
+            .ok_or_else(|| format!("could not find root bookmark: {bookmark}"))?
+            .clone();
+        root_tip_ids.push(commit_id);
+    }
+
+    // Compute roots relative to the destination, matching jj's rebase --source logic.
+    // This excludes commits that are already ancestors of trunk.
+    let roots_expression: Arc<ResolvedRevsetExpression> =
+        ResolvedRevsetExpression::commits(vec![trunk.clone()])
+            .range(&ResolvedRevsetExpression::commits(root_tip_ids))
+            .roots();
+    let root_commit_ids: Vec<CommitId> = roots_expression
+        .evaluate(env.repo.as_ref())?
+        .iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Perform the rebase.
+    let loc = MoveCommitsLocation {
+        new_parent_ids: vec![trunk.clone()],
+        new_child_ids: Vec::new(),
+        target: MoveCommitsTarget::Roots(root_commit_ids),
+    };
+    let mut tx = env.repo.start_transaction();
+    let stats = move_commits(tx.repo_mut(), &loc, &RebaseOptions::default())?;
+    tx.repo_mut().rebase_descendants()?;
+
+    print_move_commits_stats(&env.ui, &stats)?;
+    Ok(tx.commit("restack bookmarks on trunk")?)
+}
+
+/// Print details about the provided [`MoveCommitsStats`].
+fn print_move_commits_stats(ui: &Ui, stats: &MoveCommitsStats) -> std::io::Result<()> {
+    let Some(mut formatter) = ui.status_formatter() else {
+        return Ok(());
+    };
+    let &MoveCommitsStats {
+        num_rebased_targets,
+        num_rebased_descendants,
+        num_skipped_rebases,
+        num_abandoned_empty,
+        rebased_commits: _,
+    } = stats;
+    if num_skipped_rebases > 0 {
+        writeln!(
+            formatter,
+            "Skipped rebase of {num_skipped_rebases} commits that were already in place"
+        )?;
+    }
+    if num_rebased_targets > 0 {
+        writeln!(
+            formatter,
+            "Rebased {num_rebased_targets} commits to destination"
+        )?;
+    }
+    if num_rebased_descendants > 0 {
+        writeln!(
+            formatter,
+            "Rebased {num_rebased_descendants} descendant commits"
+        )?;
+    }
+    if num_abandoned_empty > 0 {
+        writeln!(
+            formatter,
+            "Abandoned {num_abandoned_empty} newly emptied commits"
+        )?;
+    }
     Ok(())
 }
 
