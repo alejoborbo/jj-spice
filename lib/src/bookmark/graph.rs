@@ -13,7 +13,7 @@ use jj_lib::{
 };
 use thiserror::Error;
 
-use super::Bookmark;
+use super::{Bookmark, resolve_commit_id};
 
 /// Nodes keyed by bookmark name and their outgoing edges, as built by
 /// [`BookmarkGraph::build_bookmark_graph`].
@@ -300,15 +300,14 @@ impl<'a> BookmarkGraph<'a> {
         repo.view()
             .bookmarks()
             .filter_map(|(ref_name, ref_target)| {
-                // Ignore unresolved/conflicted commits
-                // TODO: Improve this behavior
-                if let Some(commit_id) = ref_target.local_target.as_normal() {
-                    return Some((
-                        commit_id.to_owned(),
-                        Arc::new(Bookmark::new(ref_name.as_str().to_string(), ref_target)),
-                    ));
-                }
-                None
+                // Resolve via local target first, falling back to remote refs.
+                // This handles bookmarks that only exist as remote-tracking
+                // refs (e.g. main@origin with no local main).
+                let commit_id = resolve_commit_id(&ref_target)?;
+                Some((
+                    commit_id.to_owned(),
+                    Arc::new(Bookmark::new(ref_name.as_str().to_string(), ref_target)),
+                ))
             })
             .into_group_map()
     }

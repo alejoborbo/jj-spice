@@ -1,9 +1,27 @@
+use jj_lib::backend::CommitId;
 use jj_lib::op_store::LocalRemoteRefTarget;
 use jj_lib::ref_name::RemoteNameBuf;
 use jj_lib::refs::LocalAndRemoteRef;
 
 /// DAG of bookmarks between trunk and head for stack operations.
 pub mod graph;
+
+/// Resolve the commit a bookmark points to, preferring the local target but
+/// falling back to remote refs.
+///
+/// jj's `trunk()` revset resolves via `remote_bookmarks()` so a local
+/// bookmark is never required.  This helper follows the same semantics:
+/// when the local target is absent it returns the first available remote
+/// ref's commit instead.
+pub fn resolve_commit_id<'a>(target: &'a LocalRemoteRefTarget<'_>) -> Option<&'a CommitId> {
+    if let Some(id) = target.local_target.as_normal() {
+        return Some(id);
+    }
+    target
+        .remote_refs
+        .iter()
+        .find_map(|(_, remote_ref)| remote_ref.target.as_normal())
+}
 
 /// A remote that tracks this bookmark.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -112,9 +130,24 @@ mod tests {
         }
     }
 
+    fn commit_id(byte: u8) -> CommitId {
+        CommitId::new(vec![byte])
+    }
+
     fn make_remote_ref(tracked: bool) -> RemoteRef {
         RemoteRef {
             target: RefTarget::absent(),
+            state: if tracked {
+                RemoteRefState::Tracked
+            } else {
+                RemoteRefState::New
+            },
+        }
+    }
+
+    fn make_remote_ref_at(id: &CommitId, tracked: bool) -> RemoteRef {
+        RemoteRef {
+            target: RefTarget::normal(id.clone()),
             state: if tracked {
                 RemoteRefState::Tracked
             } else {
@@ -238,5 +271,73 @@ mod tests {
         set.insert(a);
         set.insert(b);
         assert_eq!(set.len(), 1);
+    }
+
+    // -- resolve_commit_id tests --
+
+    #[test]
+    fn resolve_commit_id_returns_local_target_when_present() {
+        let id = commit_id(1);
+        let local = RefTarget::normal(id.clone());
+        let target = LocalRemoteRefTarget {
+            local_target: &local,
+            remote_refs: vec![],
+        };
+        assert_eq!(resolve_commit_id(&target), Some(&id));
+    }
+
+    #[test]
+    fn resolve_commit_id_falls_back_to_remote_ref() {
+        let id = commit_id(2);
+        let remote = make_remote_ref_at(&id, true);
+        let target = LocalRemoteRefTarget {
+            local_target: RefTarget::absent_ref(),
+            remote_refs: vec![(RemoteName::new("origin"), &remote)],
+        };
+        assert_eq!(resolve_commit_id(&target), Some(&id));
+    }
+
+    #[test]
+    fn resolve_commit_id_falls_back_to_untracked_remote_ref() {
+        let id = commit_id(3);
+        let remote = make_remote_ref_at(&id, false);
+        let target = LocalRemoteRefTarget {
+            local_target: RefTarget::absent_ref(),
+            remote_refs: vec![(RemoteName::new("origin"), &remote)],
+        };
+        assert_eq!(resolve_commit_id(&target), Some(&id));
+    }
+
+    #[test]
+    fn resolve_commit_id_prefers_local_over_remote() {
+        let local_id = commit_id(10);
+        let remote_id = commit_id(20);
+        let local = RefTarget::normal(local_id.clone());
+        let remote = make_remote_ref_at(&remote_id, true);
+        let target = LocalRemoteRefTarget {
+            local_target: &local,
+            remote_refs: vec![(RemoteName::new("origin"), &remote)],
+        };
+        assert_eq!(resolve_commit_id(&target), Some(&local_id));
+    }
+
+    #[test]
+    fn resolve_commit_id_returns_none_when_all_absent() {
+        assert_eq!(resolve_commit_id(&absent_target()), None);
+    }
+
+    #[test]
+    fn resolve_commit_id_skips_absent_remote_refs() {
+        let id = commit_id(5);
+        let absent_remote = make_remote_ref(true); // absent target
+        let present_remote = make_remote_ref_at(&id, true);
+        let target = LocalRemoteRefTarget {
+            local_target: RefTarget::absent_ref(),
+            remote_refs: vec![
+                (RemoteName::new("origin"), &absent_remote),
+                (RemoteName::new("upstream"), &present_remote),
+            ],
+        };
+        assert_eq!(resolve_commit_id(&target), Some(&id));
     }
 }

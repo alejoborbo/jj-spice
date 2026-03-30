@@ -21,6 +21,7 @@ use cli::{Cli, SpiceCommand, StackCommand, UtilCommand};
 use env::SpiceEnv;
 use jj_cli::cli_util::RevisionArg;
 use jj_lib::repo::Repo as _;
+use jj_spice_lib::bookmark::resolve_commit_id;
 use jj_spice_lib::forge::detect::detect_forges;
 
 /// Dispatch to the appropriate command.
@@ -79,6 +80,14 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         .map_err(|e| format!("failed to resolve @: {e}"))?;
                     rt.block_on(async {
                         let detection = detect_forges(env.repo.store(), env.config())?;
+
+                        let trunk_name = env
+                            .repo
+                            .view()
+                            .bookmarks()
+                            .find(|(_, target)| resolve_commit_id(target) == Some(&trunk))
+                            .map(|(name, _)| name.as_str().to_string())
+                            .ok_or("no bookmark found at trunk commit")?;
 
                         let (forge, source_repo) = env.resolve_forge(detection.forges)?;
 

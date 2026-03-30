@@ -11,6 +11,7 @@ use jj_lib::repo::Repo;
 
 use crate::commands::env::{OutputMode, SpiceEnv};
 use jj_spice_lib::bookmark::graph::{BookmarkGraph, BookmarkNode};
+use jj_spice_lib::bookmark::resolve_commit_id;
 use jj_spice_lib::forge::detect::{DetectionResult, detect_forges};
 use jj_spice_lib::forge::{ChangeRequest, ChangeStatus, Forge};
 use jj_spice_lib::protos::change_request::ForgeMeta;
@@ -183,12 +184,12 @@ fn find_stale_roots(
 
 /// Find the bookmark name pointing at the trunk commit.
 ///
-/// Scans all bookmarks in the repo for one whose local target matches
-/// `trunk_id`. Returns `None` if no bookmark is found (shouldn't happen
-/// in practice since `trunk()` resolves from a bookmark).
+/// Scans all bookmarks in the repo for one whose commit (local or remote)
+/// matches `trunk_id`. Returns `None` if no bookmark is found (shouldn't
+/// happen in practice since `trunk()` resolves from a bookmark).
 fn resolve_trunk_bookmark_name(env: &SpiceEnv, trunk_id: &CommitId) -> Option<String> {
     env.repo.view().bookmarks().find_map(|(name, target)| {
-        if target.local_target.as_normal() == Some(trunk_id) {
+        if resolve_commit_id(&target) == Some(trunk_id) {
             Some(name.as_str().to_string())
         } else {
             None
