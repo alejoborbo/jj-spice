@@ -123,7 +123,15 @@ pub async fn run(
                         .update_base(&forge_meta, &base_bookmark)
                         .await
                         .map_err(|e| e as Box<dyn std::error::Error>)?;
-                    state.set(meta.name.clone(), cr.to_forge_meta());
+
+                    // Retargeting the base branch should not change the comment ID.
+                    // Set the comment ID with the one from the existing CR.
+                    let mut new_forge_meta = cr.to_forge_meta();
+                    if let Some(comment_id) = forge_meta.comment_id() {
+                        new_forge_meta.set_comment_id(comment_id);
+                    }
+
+                    state.set(meta.name.clone(), new_forge_meta);
                     writeln!(
                         env.ui.stdout_formatter(),
                         "Base branch has been retargeted to {}, updating change request: {}",
