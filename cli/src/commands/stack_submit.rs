@@ -171,7 +171,13 @@ pub async fn run(
             |input| -> Result<String, &'static str> { Ok(input.to_string()) },
         )?;
         let description = text_editor.edit_str(&suggested_body, Some(".md"))?;
-        let is_draft = env.ui.prompt_yes_no("Draft?", Some(false))?;
+        let is_draft = if args.draft {
+            true
+        } else if args.no_draft {
+            false
+        } else {
+            env.ui.prompt_yes_no("Draft?", Some(false))?
+        };
 
         let params = CreateParams {
             source_branch: &meta.name,

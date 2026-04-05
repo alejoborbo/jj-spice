@@ -88,6 +88,16 @@ pub struct SubmitArgs {
     /// When a bookmark has no remote, allow them to be tracked directly when submitting changes.
     #[arg(long)]
     pub auto_track_bookmarks: bool,
+    /// Set the change request in draft state.
+    ///
+    /// By default, the user is prompt to choose the CR state.
+    #[arg(long, conflicts_with = "no_draft")]
+    pub draft: bool,
+    /// Set the change request in non-draft state.
+    ///
+    /// By default, the user is prompt to choose the CR state.
+    #[arg(long, conflicts_with = "draft")]
+    pub no_draft: bool,
 }
 
 /// Arguments for `jj-spice stack sync`.
