@@ -1,14 +1,38 @@
 site_name: jj-spice
 site_url: https://alejoborbo.github.io/jj-spice
+site_description: >-
+  Submit, sync, and track stacked change requests in your Jujutsu (jj)
+  repository. Create dependent PR chains on GitHub and GitLab from the
+  command line.
+repo_url: https://github.com/alejoborbo/jj-spice
+repo_name: alejoborbo/jj-spice
+
 theme:
   name: material
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+
+plugins:
+  - search
+  - social
+
 extra:
   analytics:
     provider: google
     property: G-WFM9GL0JQ4
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/alejoborbo/jj-spice
+
 nav:
   - Home: index.md
   - Getting Started:
-    - Installation and Setup: installation-and-setup.md
+      - Installation and Setup: installation-and-setup.md
   - Reference:
-    - Configuration: references/configuration.md
+      - Configuration: references/configuration.md
