@@ -141,11 +141,6 @@ pub struct SubmitArgs {
     /// [config: `spice.auto-accept-changes`]
     #[arg(long)]
     pub auto_accept: bool,
-    /// Auto track bookmarks
-    ///
-    /// When a bookmark has no remote, allow them to be tracked directly when submitting changes.
-    #[arg(long)]
-    pub auto_track_bookmarks: bool,
     /// Set the change request in draft state.
     ///
     /// By default, the user is prompt to choose the CR state.

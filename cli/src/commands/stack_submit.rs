@@ -5,6 +5,7 @@ use std::sync::Arc;
 use itertools::Itertools;
 use jj_cli::description_util::TextEditor;
 use jj_cli::git_util::{GitSubprocessUi, print_push_stats};
+use jj_cli::revset_util::parse_remote_auto_track_bookmarks_map_for_new_bookmarks;
 use jj_cli::ui::Ui;
 use jj_lib::backend::CommitId;
 use jj_lib::commit::Commit;
@@ -93,8 +94,7 @@ pub async fn run(
     // transaction first.  The returned repo (or `env.repo` if nothing was
     // tracked) is then used to classify every bookmark's push action and to
     // validate commits.
-    let (repo_for_push, push_entries, cr_metas) =
-        collect_push_data(env, &graph, auto_accept, args.auto_track_bookmarks)?;
+    let (repo_for_push, push_entries, cr_metas) = collect_push_data(env, &graph, auto_accept)?;
 
     // ── Batch sign + push (single transaction) ──
     if !push_entries.is_empty() {
@@ -281,12 +281,11 @@ fn collect_push_data(
     env: &SpiceEnv,
     graph: &BookmarkGraph<'_>,
     auto_accept: bool,
-    auto_track_bookmark: bool,
 ) -> Result<CollectedPushData, Box<dyn std::error::Error>> {
     let remote = env.get_default_remote();
 
-    // Track all bookmarks that need tracking in a single transaction.
-    let repo_after_track = track_needed_bookmarks(env, graph, &remote, auto_track_bookmark)?;
+    // Track bookmarks that match the user's jj auto-track config.
+    let repo_after_track = track_needed_bookmarks(env, graph, &remote)?;
     let repo = repo_after_track.unwrap_or_else(|| env.repo.clone());
 
     let mut push_entries: Vec<BookmarkPushEntry> = Vec::new();
@@ -309,19 +308,15 @@ fn collect_push_data(
             Some(a) => a,
             None => {
                 // No tracked remote ref — nothing to push.
-                if !auto_track_bookmark {
-                    writeln!(
-                        env.ui.hint_default(),
-                        "No remote ref found for bookmark {name}. Run \
-                         `jj bookmark track {name} --remote={remote}` to track it.",
-                        name = bookmark.name(),
-                        remote = remote.as_symbol(),
-                    )?;
-                    return Err(
-                        format!("No remote ref found for bookmark {}", bookmark.name()).into(),
-                    );
-                }
-                continue;
+                writeln!(
+                    env.ui.hint_default(),
+                    "No remote ref found for bookmark {name}. Run \
+                     `jj bookmark track {name} --remote={remote}` to track it, \
+                     or set `remotes.{remote}.auto-track-bookmarks` in your jj config.",
+                    name = bookmark.name(),
+                    remote = remote.as_symbol(),
+                )?;
+                return Err(format!("No remote ref found for bookmark {}", bookmark.name()).into());
             }
         };
 
@@ -393,7 +388,13 @@ fn classify_push_for_bookmark(
     }))
 }
 
-/// Track all bookmarks that need tracking in a single committed transaction.
+/// Track bookmarks that match the user's `remotes.<remote>.auto-track-bookmarks`
+/// (and `auto-track-created-bookmarks`) jj config.
+///
+/// Only bookmarks in the stack graph that have no remote ref for the push
+/// remote are considered. Matching bookmarks get an absent-but-tracked remote
+/// ref, which `classify_bookmark_push_action` classifies as `Update` (push for
+/// the first time).
 ///
 /// Returns `Some(repo)` with the updated state if any bookmarks were tracked,
 /// or `None` if nothing needed tracking.
@@ -401,11 +402,16 @@ fn track_needed_bookmarks(
     env: &SpiceEnv,
     graph: &BookmarkGraph<'_>,
     remote: &RemoteNameBuf,
-    auto_track: bool,
 ) -> Result<Option<Arc<ReadonlyRepo>>, Box<dyn std::error::Error>> {
-    if !auto_track {
-        return Ok(None);
-    }
+    let remote_settings = env.settings.remote_settings()?;
+    let auto_track_matchers =
+        parse_remote_auto_track_bookmarks_map_for_new_bookmarks(&env.ui, &remote_settings)
+            .map_err(|e| e.error)?;
+
+    let matcher = match auto_track_matchers.get(remote) {
+        Some(m) => m,
+        None => return Ok(None),
+    };
 
     let mut names_to_track: Vec<String> = Vec::new();
 
@@ -417,11 +423,9 @@ fn track_needed_bookmarks(
             continue;
         }
 
-        // Track unconditionally — even if the remote doesn't have a branch
-        // with this name yet.  Tracking creates an absent-but-tracked remote
-        // ref, which classify_bookmark_push_action correctly classifies as
-        // Update (i.e. "push for the first time").
-        names_to_track.push(bookmark.name().to_string());
+        if matcher.is_match(bookmark.name()) {
+            names_to_track.push(bookmark.name().to_string());
+        }
     }
 
     if names_to_track.is_empty() {
