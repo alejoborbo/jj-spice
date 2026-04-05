@@ -73,6 +73,13 @@ pub async fn run(
             args.auto_accept
         };
 
+    // Auto-clean: when enabled, inactive (closed/merged) CRs discovered in
+    // local state are automatically removed so a fresh CR can be created.
+    let auto_clean = env
+        .config()
+        .get::<bool>(["spice", "auto-clean"])
+        .unwrap_or(true);
+
     // ── Pass 1: Track bookmarks, classify push actions, collect metadata ──
     //
     // Bookmark tracking changes the repo view, so we do it in a dedicated
@@ -91,11 +98,12 @@ pub async fn run(
     for meta in &cr_metas {
         let existing = get_existing_change_request(
             &env.ui,
-            &state,
+            &mut state,
             forge,
             &meta.name,
             source_repo,
             args.allow_inactive,
+            auto_clean,
         )
         .await?;
 
@@ -569,7 +577,8 @@ async fn post_stack_comments(
 
 /// Look up an existing change request for a bookmark.
 ///
-/// 1. Check local state first — if already tracked, return it.
+/// 1. Check local state first — if already tracked, return it (unless
+///    auto-clean is enabled and the CR is inactive on the forge).
 /// 2. Query the forge for CRs matching source/target branches.
 /// 3. If multiple CRs are found, prompt the user to pick one.
 ///
@@ -577,15 +586,39 @@ async fn post_stack_comments(
 /// cross-repo PR discovery; pass `None` in single-remote mode.
 async fn get_existing_change_request(
     ui: &jj_cli::ui::Ui,
-    state: &ChangeRequests,
+    state: &mut ChangeRequests,
     forge: &dyn Forge,
     bookmark: &str,
     source_repo: Option<&str>,
     allow_inactive: bool,
+    auto_clean: bool,
 ) -> Result<Option<ForgeMeta>, Box<dyn std::error::Error>> {
     // Check local state first.
     if let Some(meta) = state.get(bookmark) {
-        return Ok(Some(meta.clone()));
+        // When auto-clean is enabled, verify the CR is still active on the
+        // forge. Only closed CRs are removed here — merged CRs are kept
+        // because the bookmark still exists (the user may want to re-create
+        // a new CR for further changes on this branch).
+        if auto_clean {
+            if let Some(status) = jj_spice_lib::clean::check_status(forge, meta).await {
+                if matches!(status, jj_spice_lib::forge::ChangeStatus::Closed) {
+                    writeln!(
+                        ui.hint_default(),
+                        "{bookmark}: change request is {status:?}, removing from tracking \
+                         (auto-clean)",
+                    )?;
+                    state.remove(bookmark);
+                    // Fall through to forge discovery below.
+                } else {
+                    return Ok(Some(meta.clone()));
+                }
+            } else {
+                // Forge query failed — keep the existing mapping.
+                return Ok(Some(meta.clone()));
+            }
+        } else {
+            return Ok(Some(meta.clone()));
+        }
     }
 
     // Query the forge.

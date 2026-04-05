@@ -94,6 +94,34 @@ impl ChangeRequests {
     pub fn remove(&mut self, bookmark: &str) -> bool {
         self.by_bookmark.remove(bookmark).is_some()
     }
+
+    /// Iterate over all `(bookmark_name, forge_meta)` entries.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &ForgeMeta)> {
+        self.by_bookmark.iter()
+    }
+
+    /// Retain only entries for which the predicate returns `true`.
+    pub fn retain<F>(&mut self, f: F)
+    where
+        F: FnMut(&String, &mut ForgeMeta) -> bool,
+    {
+        self.by_bookmark.retain(f);
+    }
+
+    /// Return the number of tracked entries.
+    pub fn len(&self) -> usize {
+        self.by_bookmark.len()
+    }
+
+    /// Return `true` if there are no tracked entries.
+    pub fn is_empty(&self) -> bool {
+        self.by_bookmark.is_empty()
+    }
+
+    /// Return a list of all tracked bookmark names.
+    pub fn bookmark_names(&self) -> Vec<&String> {
+        self.by_bookmark.keys().collect()
+    }
 }
 
 /// Handles persistence of [`ChangeRequests`] to disk.
@@ -226,6 +254,52 @@ mod tests {
         let mut meta = ForgeMeta { forge: None };
         meta.set_comment_id(999);
         assert_eq!(meta.comment_id(), None);
+    }
+
+    #[test]
+    fn iter_returns_all_entries() {
+        let mut state = ChangeRequests::default();
+        state.set("a".into(), sample_meta(1));
+        state.set("b".into(), sample_meta(2));
+
+        let mut entries: Vec<_> = state.iter().map(|(k, _)| k.clone()).collect();
+        entries.sort();
+        assert_eq!(entries, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn retain_keeps_matching_entries() {
+        let mut state = ChangeRequests::default();
+        state.set("keep".into(), sample_meta(1));
+        state.set("drop".into(), sample_meta(2));
+
+        state.retain(|name, _| name == "keep");
+
+        assert!(state.get("keep").is_some());
+        assert!(state.get("drop").is_none());
+        assert_eq!(state.len(), 1);
+    }
+
+    #[test]
+    fn len_and_is_empty() {
+        let mut state = ChangeRequests::default();
+        assert!(state.is_empty());
+        assert_eq!(state.len(), 0);
+
+        state.set("a".into(), sample_meta(1));
+        assert!(!state.is_empty());
+        assert_eq!(state.len(), 1);
+    }
+
+    #[test]
+    fn bookmark_names_returns_all_keys() {
+        let mut state = ChangeRequests::default();
+        state.set("x".into(), sample_meta(1));
+        state.set("y".into(), sample_meta(2));
+
+        let mut names: Vec<_> = state.bookmark_names().into_iter().cloned().collect();
+        names.sort();
+        assert_eq!(names, vec!["x", "y"]);
     }
 
     #[test]

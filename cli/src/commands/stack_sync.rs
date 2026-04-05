@@ -123,7 +123,67 @@ pub async fn run(
         }
     }
 
+    // Auto-clean: remove stale and inactive entries when enabled.
+    let auto_clean = env
+        .config()
+        .get::<bool>(["spice", "auto-clean"])
+        .unwrap_or(true);
+
+    if auto_clean {
+        let local_bookmarks: HashSet<String> = env
+            .repo
+            .view()
+            .bookmarks()
+            .map(|(name, _)| name.as_str().to_string())
+            .collect();
+        auto_clean_entries(&env.ui, &mut state, &forges, &local_bookmarks).await?;
+    }
+
     cr_store.save(&state)?;
+    Ok(())
+}
+
+/// Remove stale and inactive entries from the CR store during sync.
+///
+/// Closed CRs are always removed. Merged CRs are only removed when the
+/// bookmark no longer exists locally. Uses the first available forge for
+/// status queries.
+async fn auto_clean_entries(
+    ui: &Ui,
+    state: &mut jj_spice_lib::protos::change_request::ChangeRequests,
+    forges: &HashMap<String, Box<dyn Forge>>,
+    local_bookmarks: &HashSet<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(forge) = forges.values().next() else {
+        return Ok(());
+    };
+
+    let inactive =
+        jj_spice_lib::clean::find_inactive_entries(state, forge.as_ref(), local_bookmarks).await;
+
+    if inactive.is_empty() {
+        return Ok(());
+    }
+
+    for entry in &inactive {
+        writeln!(
+            ui.status(),
+            "Auto-clean: removing {}: {} ({})",
+            entry.bookmark,
+            entry.meta,
+            entry.reason,
+        )?;
+    }
+
+    let result = jj_spice_lib::clean::CleanResult { entries: inactive };
+    jj_spice_lib::clean::apply_clean(state, &result);
+
+    writeln!(
+        ui.status(),
+        "Auto-clean: removed {} inactive entry(ies)",
+        result.total(),
+    )?;
+
     Ok(())
 }
 

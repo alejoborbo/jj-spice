@@ -6,12 +6,16 @@ mod completion;
 pub(crate) mod env;
 /// `util install-aliases` command implementation.
 mod install_aliases;
+/// `stack clean` command implementation.
+mod stack_clean;
 /// `stack log` command implementation.
 mod stack_log;
 /// `stack submit` command implementation.
 pub mod stack_submit;
 /// `stack sync` command implementation.
 pub mod stack_sync;
+/// `stack untrack` command implementation.
+mod stack_untrack;
 
 use cli::{Cli, SpiceCommand, StackCommand, UtilCommand};
 use env::SpiceEnv;
@@ -57,6 +61,11 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let rt = tokio::runtime::Runtime::new()?;
 
             match stack_args.command {
+                StackCommand::Clean(clean_args) => rt.block_on(async {
+                    let detection = detect_forges(env.repo.store(), env.config())?;
+                    let (forge, _) = env.resolve_forge(detection.forges)?;
+                    stack_clean::run(&clean_args, &env, forge.as_ref()).await
+                }),
                 StackCommand::Log(log_args) => {
                     env.ui.request_pager();
                     let result =
@@ -97,6 +106,19 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         &trunk_name,
                     ))
                 }
+                StackCommand::Untrack(untrack_args) => rt.block_on(async {
+                    // Forge is optional for untrack — only needed for
+                    // --all-inactive to query CR status on the forge.
+                    let forge: Option<Box<dyn jj_spice_lib::forge::Forge>> =
+                        if untrack_args.all_inactive {
+                            let detection = detect_forges(env.repo.store(), env.config())?;
+                            let (f, _) = env.resolve_forge(detection.forges)?;
+                            Some(f)
+                        } else {
+                            None
+                        };
+                    stack_untrack::run(&untrack_args, &env, forge.as_deref()).await
+                }),
             }
         }
     }

@@ -44,12 +44,23 @@ pub struct StackArgs {
 /// Operations available under `jj-spice stack`.
 #[derive(Subcommand, Clone, Debug)]
 pub enum StackCommand {
+    /// Remove stale and inactive change request entries from local tracking.
+    ///
+    /// Stale entries are bookmarks that no longer exist in the repository.
+    /// Inactive entries are change requests that are closed or merged on the
+    /// forge. Both kinds are removed by default.
+    Clean(CleanArgs),
     /// Show the bookmark DAG with change request status.
     Log(LogArgs),
     /// Submit the current stack of bookmarks for review.
     Submit(SubmitArgs),
     /// Discover and track existing change requests for bookmarks in the stack.
     Sync(SyncArgs),
+    /// Stop tracking change requests for specific bookmarks.
+    ///
+    /// Removes the bookmark-to-CR mapping from local storage so that a new
+    /// change request can be created on the next `stack submit`.
+    Untrack(UntrackArgs),
 }
 
 /// Arguments for `jj-spice stack log`.
@@ -119,6 +130,25 @@ pub struct SyncArgs {
     /// By default, latest version of the trunk is fetched, but the stack is not rebased.
     #[arg(long)]
     pub restack: bool,
+}
+
+/// Arguments for `jj-spice stack untrack`.
+#[derive(Args, Clone, Debug)]
+pub struct UntrackArgs {
+    /// Bookmark names to stop tracking.
+    #[arg(required_unless_present = "all_inactive")]
+    pub bookmarks: Vec<String>,
+    /// Remove all entries whose change request is closed or merged on the forge.
+    #[arg(long)]
+    pub all_inactive: bool,
+}
+
+/// Arguments for `jj-spice stack clean`.
+#[derive(Args, Clone, Debug)]
+pub struct CleanArgs {
+    /// Show what would be removed without making changes.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Arguments for the `util` subcommand group.
@@ -413,6 +443,80 @@ mod tests {
         assert!(cli.global_args.early_args.color.is_none());
         assert!(cli.global_args.early_args.config.is_empty());
         assert!(cli.global_args.early_args.config_file.is_empty());
+    }
+
+    // ---- Stack untrack tests ----
+
+    #[test]
+    fn parse_stack_untrack_single_bookmark() {
+        let cli = Cli::try_parse_from(["jj-spice", "stack", "untrack", "feat-a"]).unwrap();
+        match cli.command {
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Untrack(args),
+            }) => {
+                assert_eq!(args.bookmarks, vec!["feat-a"]);
+                assert!(!args.all_inactive);
+            }
+            _ => panic!("expected Untrack"),
+        }
+    }
+
+    #[test]
+    fn parse_stack_untrack_multiple_bookmarks() {
+        let cli =
+            Cli::try_parse_from(["jj-spice", "stack", "untrack", "feat-a", "feat-b"]).unwrap();
+        match cli.command {
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Untrack(args),
+            }) => {
+                assert_eq!(args.bookmarks, vec!["feat-a", "feat-b"]);
+                assert!(!args.all_inactive);
+            }
+            _ => panic!("expected Untrack"),
+        }
+    }
+
+    #[test]
+    fn parse_stack_untrack_all_inactive() {
+        let cli = Cli::try_parse_from(["jj-spice", "stack", "untrack", "--all-inactive"]).unwrap();
+        match cli.command {
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Untrack(args),
+            }) => {
+                assert!(args.all_inactive);
+                assert!(args.bookmarks.is_empty());
+            }
+            _ => panic!("expected Untrack"),
+        }
+    }
+
+    #[test]
+    fn parse_stack_untrack_no_args_fails() {
+        assert!(Cli::try_parse_from(["jj-spice", "stack", "untrack"]).is_err());
+    }
+
+    // ---- Stack clean tests ----
+
+    #[test]
+    fn parse_stack_clean() {
+        let cli = Cli::try_parse_from(["jj-spice", "stack", "clean"]).unwrap();
+        match cli.command {
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Clean(args),
+            }) => assert!(!args.dry_run),
+            _ => panic!("expected Clean"),
+        }
+    }
+
+    #[test]
+    fn parse_stack_clean_dry_run() {
+        let cli = Cli::try_parse_from(["jj-spice", "stack", "clean", "--dry-run"]).unwrap();
+        match cli.command {
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Clean(args),
+            }) => assert!(args.dry_run),
+            _ => panic!("expected Clean"),
+        }
     }
 
     // ---- Util completion tests ----
