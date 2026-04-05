@@ -1,5 +1,8 @@
+use std::fmt::Write as _;
+
+use clap::builder::StyledStr;
 use clap::builder::Styles;
-use clap::builder::styling::AnsiColor;
+use clap::builder::styling::{AnsiColor, Style as AnsiStyle};
 use clap::{Args, Command, Parser, Subcommand};
 use jj_cli::cli_util::GlobalArgs;
 
@@ -12,6 +15,34 @@ const STYLES: Styles = Styles::styled()
     .usage(AnsiColor::Yellow.on_default().bold())
     .literal(AnsiColor::Green.on_default().bold())
     .placeholder(AnsiColor::Green.on_default());
+
+/// Style for section headers in after-help text (matches `STYLES` header).
+const HEADER_STYLE: AnsiStyle = AnsiColor::Yellow.on_default().bold();
+/// Style for config key literals in after-help text (matches `STYLES` literal).
+const LITERAL_STYLE: AnsiStyle = AnsiColor::Green.on_default().bold();
+
+/// Build a styled "Configuration:" after-help section for `--help` output.
+///
+/// Matches the indentation and layout of clap's built-in "Options:" section:
+/// 6-space indent for key names, 10-space indent for description lines,
+/// blank line between entries. ANSI codes are stripped automatically by
+/// clap's output pipeline when colour is disabled.
+fn config_after_help(entries: &[(&str, &str)]) -> StyledStr {
+    let mut out = StyledStr::new();
+    writeln!(out, "{HEADER_STYLE}Configuration:{HEADER_STYLE:#}").unwrap();
+
+    for (i, &(key, desc)) in entries.iter().enumerate() {
+        writeln!(out, "      {LITERAL_STYLE}{key}{LITERAL_STYLE:#}").unwrap();
+        for line in desc.lines() {
+            writeln!(out, "          {line}").unwrap();
+        }
+        // Blank line between entries, but not after the last one.
+        if i + 1 < entries.len() {
+            writeln!(out).unwrap();
+        }
+    }
+    out
+}
 
 /// jj-spice: forge integration for jj.
 #[derive(Parser, Clone, Debug)]
@@ -35,6 +66,11 @@ pub enum SpiceCommand {
 
 /// Arguments for the `stack` subcommand group.
 #[derive(Args, Clone, Debug)]
+#[command(after_long_help = config_after_help(&[
+    ("spice.output",                 "Terminal output fidelity: \"modern\" (default) or \"classic\""),
+    ("spice.upstream-remote",        "Override the upstream remote name for fork workflows (string)"),
+    ("spice.forges.<hostname>.type", "Forge type for a custom hostname: \"github\" or \"gitlab\""),
+]))]
 pub struct StackArgs {
     /// The stack operation to perform.
     #[command(subcommand)]
@@ -65,6 +101,10 @@ pub enum StackCommand {
 
 /// Arguments for `jj-spice stack log`.
 #[derive(Args, Clone, Debug)]
+#[command(after_long_help = config_after_help(&[
+    ("spice.output", "Terminal output fidelity: \"modern\" (default) or \"classic\".\n\
+                      Controls status badge rendering and link format."),
+]))]
 pub struct LogArgs {
     /// Which revisions to show bookmarks for.
     ///
@@ -79,6 +119,11 @@ pub struct LogArgs {
 
 /// Arguments for `jj-spice stack submit`.
 #[derive(Args, Clone, Debug)]
+#[command(after_long_help = config_after_help(&[
+    ("spice.auto-accept-changes", "Skip the push-confirmation prompt (bool, default: false).\n\
+                                   Equivalent to --auto-accept."),
+    ("spice.auto-clean",          "Remove closed CRs from tracking automatically (bool, default: true)."),
+]))]
 pub struct SubmitArgs {
     /// Allow intactive (merged and closed) change requests to be tracked.
     ///
@@ -92,6 +137,8 @@ pub struct SubmitArgs {
     ///
     /// By default, the user will be prompted if some changes are untracked.
     /// If the --auto-accept flag is passed, untracked changes will be automatically pushed.
+    ///
+    /// [config: `spice.auto-accept-changes`]
     #[arg(long)]
     pub auto_accept: bool,
     /// Auto track bookmarks
@@ -113,6 +160,9 @@ pub struct SubmitArgs {
 
 /// Arguments for `jj-spice stack sync`.
 #[derive(Args, Clone, Debug)]
+#[command(after_long_help = config_after_help(&[
+    ("spice.auto-clean", "Remove stale/inactive CRs from tracking automatically (bool, default: true)."),
+]))]
 pub struct SyncArgs {
     /// Re-discover change requests even for bookmarks that are already tracked.
     #[arg(long)]
