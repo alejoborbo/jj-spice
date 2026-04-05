@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 
 use jj_cli::cli_util::RevisionArg;
@@ -45,6 +45,7 @@ const SPICE_COLOR_DEFAULTS_MODERN: &str = r##"
 "spice status_unknown cap" = { fg = "bright black", bg = "default", bold = false }
 "spice current" = { fg = "green", bold = true }
 "spice nearby" = { fg = "green", bold = true }
+"spice rebase_warning" = { fg = "yellow", bold = true }
 "##;
 
 /// Default color rules for `stack log` output (classic mode).
@@ -66,6 +67,7 @@ const SPICE_COLOR_DEFAULTS_CLASSIC: &str = r##"
 "spice status_unknown" = { fg = "bright black", bold = true }
 "spice current" = { fg = "green", bold = true }
 "spice nearby" = { fg = "green", bold = true }
+"spice rebase_warning" = { fg = "yellow", bold = true }
 "##;
 
 /// Left cap of a pill-shaped status badge (Powerline rounded glyph, modern mode).
@@ -134,6 +136,9 @@ pub async fn run(
     let nodes: Vec<&BookmarkNode> = graph.iter_graph()?.collect();
     let live_crs = fetch_live_crs(&nodes, &cr_state, &detection).await;
 
+    // Find root bookmarks not parented on current trunk.
+    let stale_roots = find_stale_roots(env.repo.as_ref(), &graph, trunk);
+
     // Render the graph.
     render_graph(
         env,
@@ -143,9 +148,37 @@ pub async fn run(
         &cr_state,
         &live_crs,
         wc_commit.as_ref(),
+        &stale_roots,
     )?;
 
     Ok(())
+}
+
+/// Collect root bookmarks whose commits are not parented on trunk.
+///
+/// Each returned name is a root bookmark (bottom of a stack) whose commit
+/// has no parent matching `trunk_id`, meaning `jj rebase` is needed to
+/// bring that stack up to date with trunk.
+fn find_stale_roots(
+    repo: &dyn Repo,
+    graph: &BookmarkGraph,
+    trunk_id: &CommitId,
+) -> HashSet<String> {
+    let mut stale = HashSet::new();
+    for root_name in graph.root_bookmarks() {
+        let Some(node) = graph.get_node(root_name) else {
+            continue;
+        };
+        for commit_id in node.commits() {
+            let Ok(commit) = repo.store().get_commit(commit_id) else {
+                continue;
+            };
+            if !commit.parent_ids().contains(trunk_id) {
+                stale.insert(root_name.clone());
+            }
+        }
+    }
+    stale
 }
 
 /// Find the bookmark name pointing at the trunk commit.
@@ -329,6 +362,7 @@ fn find_forge_for_bookmark<'a>(
 /// `feature-d → [feature-b, feature-c]`). This is the same direction
 /// graphlog expects: each node's edges point to nodes that will be rendered
 /// **later** (below) in the output.
+#[allow(clippy::too_many_arguments)]
 fn render_graph(
     env: &SpiceEnv,
     nodes: &[&BookmarkNode<'_>],
@@ -337,6 +371,7 @@ fn render_graph(
     cr_state: &jj_spice_lib::protos::change_request::ChangeRequests,
     live_crs: &HashMap<String, Result<Box<dyn ChangeRequest>, String>>,
     wc_commit: Option<&CommitId>,
+    stale_roots: &HashSet<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mode = env.output_mode;
 
@@ -381,7 +416,8 @@ fn render_graph(
             let mut text_buf: Vec<u8> = Vec::new();
             {
                 let mut fmt = factory.new_formatter(&mut text_buf);
-                render_node_text(&mut *fmt, node, cr_state, live_crs, mode)?;
+                let needs_rebase = stale_roots.contains(name);
+                render_node_text(&mut *fmt, node, cr_state, live_crs, mode, needs_rebase)?;
             }
             let text = String::from_utf8_lossy(&text_buf);
 
@@ -395,12 +431,7 @@ fn render_graph(
             let mut text_buf: Vec<u8> = Vec::new();
             {
                 let mut fmt = factory.new_formatter(&mut text_buf);
-                fmt.push_label("spice");
-                fmt.push_label("trunk");
-                write!(fmt, "{trunk}")?;
-                fmt.pop_label();
-                fmt.pop_label();
-                writeln!(fmt)?;
+                render_trunk_text(&mut *fmt, trunk)?;
             }
             let text = String::from_utf8_lossy(&text_buf);
             graphlog.add_node(&trunk.to_string(), &[], TRUNK_SYMBOL, &text)?;
@@ -469,7 +500,7 @@ fn render_node_symbol(
 
 /// Render the node text for a single bookmark (always 2 lines).
 ///
-/// Line 1: bookmark name + status pill + link (or placeholder)
+/// Line 1: bookmark name + status pill + link (or placeholder) [+ rebase warning]
 /// Line 2: CR title, or empty when no title is available
 fn render_node_text(
     fmt: &mut dyn Formatter,
@@ -477,6 +508,7 @@ fn render_node_text(
     cr_state: &jj_spice_lib::protos::change_request::ChangeRequests,
     live_crs: &HashMap<String, Result<Box<dyn ChangeRequest>, String>>,
     mode: OutputMode,
+    needs_rebase: bool,
 ) -> std::io::Result<()> {
     let name = node.name();
     let meta = cr_state.get(name);
@@ -525,6 +557,13 @@ fn render_node_text(
         }
     }
 
+    if needs_rebase {
+        write!(fmt, " ")?;
+        fmt.push_label("rebase_warning");
+        write!(fmt, "(needs rebase)")?;
+        fmt.pop_label();
+    }
+
     fmt.pop_label();
     writeln!(fmt)?;
 
@@ -541,6 +580,17 @@ fn render_node_text(
     }
     writeln!(fmt)?;
 
+    Ok(())
+}
+
+/// Render the trunk node text.
+fn render_trunk_text(fmt: &mut dyn Formatter, trunk_name: &str) -> std::io::Result<()> {
+    fmt.push_label("spice");
+    fmt.push_label("trunk");
+    write!(fmt, "{trunk_name}")?;
+    fmt.pop_label();
+    fmt.pop_label();
+    writeln!(fmt)?;
     Ok(())
 }
 
@@ -772,11 +822,21 @@ mod tests {
         live_crs: &LiveCrMap,
         mode: OutputMode,
     ) -> String {
+        render_node_plain_with_rebase(node, cr_state, live_crs, mode, false)
+    }
+
+    fn render_node_plain_with_rebase(
+        node: &BookmarkNode,
+        cr_state: &ChangeRequests,
+        live_crs: &HashMap<String, Result<Box<dyn ChangeRequest>, String>>,
+        mode: OutputMode,
+        needs_rebase: bool,
+    ) -> String {
         let factory = jj_cli::formatter::FormatterFactory::plain_text();
         let mut buf = Vec::new();
         {
             let mut fmt = factory.new_formatter(&mut buf);
-            render_node_text(&mut *fmt, node, cr_state, live_crs, mode).unwrap();
+            render_node_text(&mut *fmt, node, cr_state, live_crs, mode, needs_rebase).unwrap();
         }
         String::from_utf8(buf).unwrap()
     }
@@ -909,6 +969,94 @@ mod tests {
             assert!(first_line.contains("Draft"));
             assert!(!first_line.contains("Open"));
         }
+    }
+
+    // -- render_trunk_text tests (plain text) --
+
+    fn render_trunk_plain(trunk_name: &str) -> String {
+        let factory = jj_cli::formatter::FormatterFactory::plain_text();
+        let mut buf = Vec::new();
+        {
+            let mut fmt = factory.new_formatter(&mut buf);
+            render_trunk_text(&mut *fmt, trunk_name).unwrap();
+        }
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn trunk_text_plain() {
+        let text = render_trunk_plain("main");
+        assert_eq!(text, "main\n");
+    }
+
+    // -- rebase warning on root bookmark tests --
+
+    #[test]
+    fn node_text_no_cr_with_rebase_warning() {
+        let node = make_node("feature-a");
+        let cr_state = ChangeRequests::default();
+        let live_crs = HashMap::new();
+
+        let text =
+            render_node_plain_with_rebase(&node, &cr_state, &live_crs, OutputMode::Modern, true);
+        assert_eq!(text, "feature-a (no change request) (needs rebase)\n\n");
+    }
+
+    #[test]
+    fn node_text_no_cr_without_rebase_warning() {
+        let node = make_node("feature-a");
+        let cr_state = ChangeRequests::default();
+        let live_crs = HashMap::new();
+
+        let text =
+            render_node_plain_with_rebase(&node, &cr_state, &live_crs, OutputMode::Modern, false);
+        assert_eq!(text, "feature-a (no change request)\n\n");
+    }
+
+    #[test]
+    fn node_text_with_live_cr_and_rebase_warning() {
+        let node = make_node("feat");
+        let mut cr_state = ChangeRequests::default();
+        cr_state.set(
+            "feat".into(),
+            ForgeMeta {
+                forge: Some(ForgeOneof::Github(GitHubMeta {
+                    number: 3,
+                    source_branch: String::new(),
+                    target_branch: String::new(),
+                    source_repo: String::new(),
+                    target_repo: String::new(),
+                    graphql_id: String::new(),
+                    comment_id: None,
+                })),
+            },
+        );
+        let mut live_crs: HashMap<String, Result<Box<dyn ChangeRequest>, String>> = HashMap::new();
+        live_crs.insert(
+            "feat".into(),
+            Ok(Box::new(GitHubChangeRequest {
+                meta: GitHubMeta {
+                    number: 3,
+                    source_branch: "feat".into(),
+                    target_branch: "main".into(),
+                    source_repo: "o/r".into(),
+                    target_repo: "o/r".into(),
+                    graphql_id: String::new(),
+                    comment_id: None,
+                },
+                host: "github.com".into(),
+                title: "Cool".into(),
+                body: None,
+                status: ChangeStatus::Open,
+                url: "https://github.com/o/r/pull/3".into(),
+            })),
+        );
+
+        let text =
+            render_node_plain_with_rebase(&node, &cr_state, &live_crs, OutputMode::Modern, true);
+        let first_line = text.lines().next().unwrap();
+        assert!(first_line.contains("(needs rebase)"));
+        assert!(first_line.contains("Open"));
     }
 
     #[test]
