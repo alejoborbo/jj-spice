@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write as _;
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ use jj_lib::repo::ReadonlyRepo;
 use jj_lib::revset::ResolvedRevsetExpression;
 use jj_lib::signing::SignBehavior;
 use jj_spice_lib::bookmark::graph::BookmarkGraph;
-use jj_spice_lib::comments::Comment;
+use jj_spice_lib::comments::{Comment, LiveCrData};
 use jj_spice_lib::forge::{CreateParams, Forge};
 use jj_spice_lib::protos::change_request::{ChangeRequests, ForgeMeta};
 use jj_spice_lib::store::change_request::ChangeRequestStore;
@@ -578,6 +578,32 @@ async fn post_stack_comments(
     state: &mut ChangeRequests,
     trunk_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Fetch the current remote state for each bookmark in the graph, and use it to build the live
+    // data.
+    let cr_entries: Vec<_> = state.iter().collect();
+    let cr_metas: Vec<&ForgeMeta> = cr_entries.iter().map(|(_, meta)| *meta).collect();
+    let results = forge.get_batch(cr_metas).await;
+
+    // Build the live data for each change request.
+    // This is used to display the PR title, and status to the comment in the change request.
+    let mut live_cr_data: BTreeMap<String, LiveCrData> = BTreeMap::new();
+    for (result, (_, meta)) in results.into_iter().zip(&cr_entries) {
+        if let Ok(cr) = result
+            && let Some(source_branch) = meta.source_branch()
+        {
+            {
+                live_cr_data.insert(
+                    source_branch.to_string(),
+                    LiveCrData {
+                        status: cr.status(),
+                        title: cr.title().to_string(),
+                        url: cr.url().to_string(),
+                    },
+                );
+            }
+        }
+    }
+
     // Build comment text + metadata for each bookmark in one pass.
     let comment_tasks: Vec<(String, ForgeMeta, String)> = graph
         .iter_graph()?
@@ -590,6 +616,7 @@ async fn post_stack_comments(
                 .ok_or_else(|| format!("no change request found for bookmark '{name}'"))?
                 .clone();
             let comment_text = Comment::new(bookmark, graph, state)
+                .with_live_data(&live_cr_data)
                 .with_trunk(trunk_name)
                 .to_string()?;
             Ok((name.to_string(), meta, comment_text))
