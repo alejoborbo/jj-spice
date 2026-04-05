@@ -65,25 +65,31 @@ pub async fn run(
     resolve_unmatched_remotes(env, &unmatched, &mut forges)?;
 
     // Fetch the latest remote changes for the trunk branch.
-    fetch_trunk(env, trunk_name)?;
+    // The returned repo reflects the fetched state so subsequent operations
+    // see the up-to-date trunk.
+    let repo_after_fetch = fetch_trunk(env, trunk_name)?;
+
+    // Re-resolve trunk from the updated view — the bookmark may have advanced
+    // after the fetch (e.g. new merge commits on main).
+    let trunk = repo_after_fetch
+        .view()
+        .get_local_bookmark(RefName::new(trunk_name))
+        .as_normal()
+        .cloned()
+        .unwrap_or_else(|| trunk.clone());
 
     // Build the bookmark graph. If the `--restack` flag is specified, rebase the
     // stack onto trunk first, then build the graph from the updated repo state.
-    let _restacked_repo: Option<Arc<ReadonlyRepo>>;
-    let graph;
-    if args.restack {
-        let initial_graph = BookmarkGraph::build_active_graph(env.repo.as_ref(), trunk, head)?;
+    let active_repo = if args.restack {
+        // Build a temporary graph to discover root bookmarks, then rebase.
+        let initial_graph =
+            BookmarkGraph::build_active_graph(repo_after_fetch.as_ref(), &trunk, head)?;
         let root_bookmarks = initial_graph.root_bookmarks.clone();
-        _restacked_repo = Some(restack_graph(env, &root_bookmarks, trunk)?);
-        graph = BookmarkGraph::build_active_graph(
-            _restacked_repo.as_ref().unwrap().as_ref(),
-            trunk,
-            head,
-        )?;
+        restack_graph(env, &repo_after_fetch, &root_bookmarks, &trunk)?
     } else {
-        _restacked_repo = None;
-        graph = BookmarkGraph::build_active_graph(env.repo.as_ref(), trunk, head)?;
-    }
+        repo_after_fetch
+    };
+    let graph = BookmarkGraph::build_active_graph(active_repo.as_ref(), &trunk, head)?;
 
     let spice_store = SpiceStore::init_at(env.workspace.repo_path())?;
     let cr_store = ChangeRequestStore::new(&spice_store);
@@ -203,8 +209,14 @@ fn resolve_unmatched_remotes(
     Ok(())
 }
 
-/// Fetch the latest remote changes for trunk
-fn fetch_trunk(env: &SpiceEnv, trunk_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+/// Fetch the latest remote changes for trunk.
+///
+/// Returns the committed repo snapshot so callers see the updated trunk
+/// position instead of the stale `env.repo`.
+fn fetch_trunk(
+    env: &SpiceEnv,
+    trunk_name: &str,
+) -> Result<Arc<ReadonlyRepo>, Box<dyn std::error::Error>> {
     // Get all trunk remotes.
     let trunk_remotes: Vec<&RemoteName> = env
         .repo
@@ -262,20 +274,22 @@ fn fetch_trunk(env: &SpiceEnv, trunk_name: &str) -> Result<(), Box<dyn std::erro
         )?;
     }
 
-    tx.commit("fetch trunk")?;
-
-    Ok(())
+    Ok(tx.commit("fetch trunk")?)
 }
 
 /// Restack the bookmark graph on top of the trunk branch.
-/// Returns the updated repo so the caller can build a fresh graph from the new state.
+///
+/// Uses the provided `repo` snapshot (instead of the potentially stale
+/// `env.repo`) so that the rebase sees the freshly-fetched trunk position.
+/// Returns the committed repo for downstream graph construction.
 fn restack_graph(
     env: &SpiceEnv,
+    repo: &Arc<ReadonlyRepo>,
     root_bookmarks: &[String],
     trunk: &CommitId,
 ) -> Result<Arc<ReadonlyRepo>, Box<dyn std::error::Error>> {
     // Collect the tip commit IDs of all root bookmarks.
-    let view = env.repo.view();
+    let view = repo.view();
     let mut root_tip_ids = Vec::with_capacity(root_bookmarks.len());
     for bookmark in root_bookmarks {
         let commit_id = view
@@ -293,7 +307,7 @@ fn restack_graph(
             .range(&ResolvedRevsetExpression::commits(root_tip_ids))
             .roots();
     let root_commit_ids: Vec<CommitId> = roots_expression
-        .evaluate(env.repo.as_ref())?
+        .evaluate(repo.as_ref())?
         .iter()
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -303,7 +317,7 @@ fn restack_graph(
         new_child_ids: Vec::new(),
         target: MoveCommitsTarget::Roots(root_commit_ids),
     };
-    let mut tx = env.repo.start_transaction();
+    let mut tx = repo.start_transaction();
     let stats = move_commits(tx.repo_mut(), &loc, &RebaseOptions::default())?;
     tx.repo_mut().rebase_descendants()?;
 
