@@ -5,6 +5,7 @@ use std::sync::Arc;
 use itertools::Itertools;
 use jj_cli::description_util::TextEditor;
 use jj_cli::git_util::{GitSubprocessUi, print_push_stats};
+use jj_cli::ui::Ui;
 use jj_lib::backend::CommitId;
 use jj_lib::commit::Commit;
 use jj_lib::git::{self, GitBranchPushTargets};
@@ -44,6 +45,12 @@ struct BookmarkCrMeta {
     name: String,
     ascendants: Vec<String>,
     commits: Vec<CommitId>,
+}
+
+/// Whether a base bookmark has been resolved, or a user input is needed.
+enum ResolvedBaseBookmark {
+    Resolved(String),
+    NeedUserInput,
 }
 
 /// Create change requests for each bookmark in the current stack (trunk..@).
@@ -96,7 +103,7 @@ pub async fn run(
 
     // ── Pass 2: Create / retarget change requests ──
     for meta in &cr_metas {
-        let existing = get_existing_change_request(
+        let maybe_cr = get_existing_change_request(
             &env.ui,
             &mut state,
             forge,
@@ -107,26 +114,9 @@ pub async fn run(
         )
         .await?;
 
-        let base_bookmark = match meta.ascendants.len() {
-            0 => trunk_name.to_string(),
-            1 => meta.ascendants[0].clone(),
-            _ => {
-                writeln!(env.ui.stdout_formatter(), "Multiple base bookmarks found:")?;
-                for (i, a) in meta.ascendants.iter().enumerate() {
-                    writeln!(env.ui.stdout_formatter(), "  {}: {}", i, a)?;
-                }
+        let base_bookmark = get_base_bookmark(&env.ui, &maybe_cr, meta, trunk_name)?;
 
-                let choices: Vec<String> =
-                    (0..meta.ascendants.len()).map(|i| i.to_string()).collect();
-                let index = env
-                    .ui
-                    .prompt_choice("Select base bookmark", &choices, Some(0))?;
-
-                meta.ascendants[index].clone()
-            }
-        };
-
-        if let Some(forge_meta) = existing {
+        if let Some(forge_meta) = maybe_cr {
             match forge_meta.target_branch() {
                 Some(tb) if tb != base_bookmark => {
                     let cr = forge
@@ -219,6 +209,58 @@ pub async fn run(
     cr_store.save(&state)?;
 
     Ok(())
+}
+
+/// Fetch the current branch's base bookmark.
+fn get_base_bookmark(
+    ui: &Ui,
+    maybe_forge_meta: &Option<ForgeMeta>,
+    meta: &BookmarkCrMeta,
+    trunk_name: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    match resolve_base_bookmark(maybe_forge_meta, meta.ascendants.as_ref(), trunk_name) {
+        ResolvedBaseBookmark::Resolved(b) => Ok(b),
+        ResolvedBaseBookmark::NeedUserInput => {
+            writeln!(ui.stdout_formatter(), "Multiple base bookmarks found:")?;
+            for (i, a) in meta.ascendants.iter().enumerate() {
+                writeln!(ui.stdout_formatter(), "  {}: {}", i, a)?;
+            }
+
+            let choices: Vec<String> = (0..meta.ascendants.len()).map(|i| i.to_string()).collect();
+            let index = ui.prompt_choice("Select base bookmark", &choices, Some(0))?;
+
+            Ok(meta.ascendants[index].clone())
+        }
+    }
+}
+
+/// Resolve the base bookmark for a bookmark.
+/// If it's not resolved, we need the user to select a base bookmark.
+fn resolve_base_bookmark(
+    maybe_forge_meta: &Option<ForgeMeta>,
+    ascendants: &[String],
+    trunk_name: &str,
+) -> ResolvedBaseBookmark {
+    match ascendants.len() {
+        0 => ResolvedBaseBookmark::Resolved(trunk_name.to_string()),
+        1 => ResolvedBaseBookmark::Resolved(ascendants[0].clone()),
+        _ => {
+            // If a change request exists for the bookmark, and that the target bookmark is one
+            // of the ascendants of the current bookmark, then we can use the existing change
+            // without prompting the user.
+            if let Some(forge_meta) = maybe_forge_meta
+                && let Some(target_branch) = forge_meta.target_branch()
+                && ascendants.contains(&target_branch.to_string())
+            {
+                return ResolvedBaseBookmark::Resolved(target_branch.to_string());
+            }
+
+            // If no change request exists for the bookmark, or the target bookmark is not one
+            // of the ascendants of the current bookmark, we need the user to select a
+            // base bookmark.
+            ResolvedBaseBookmark::NeedUserInput
+        }
+    }
 }
 
 /// First pass: track untracked bookmarks, classify push actions, and collect
@@ -808,8 +850,11 @@ mod tests {
     use jj_lib::refs::BookmarkPushUpdate;
     use jj_lib::settings::SignSettings;
     use jj_lib::signing::SignBehavior;
+    use jj_spice_lib::protos::change_request::forge_meta::Forge as ForgeOneof;
+    use jj_spice_lib::protos::change_request::{ForgeMeta, GitHubMeta};
 
     use super::remap_push_targets;
+    use super::{ResolvedBaseBookmark, resolve_base_bookmark};
 
     /// Build a minimal `backend::Commit` for sign-settings tests.
     fn make_commit(email: &str, signed: bool) -> Commit {
@@ -1158,5 +1203,59 @@ mod tests {
         assert_eq!(updates[0].1.new_target, Some(cid(11)));
         assert_eq!(updates[1].1.new_target, Some(cid(22)));
         assert_eq!(updates[2].1.new_target, Some(cid(33)));
+    }
+
+    // -- test the base bookmark selection
+    fn github_forge_meta(target_branch: &str) -> ForgeMeta {
+        ForgeMeta {
+            forge: Some(ForgeOneof::Github(GitHubMeta {
+                target_branch: target_branch.to_string(),
+                ..Default::default()
+            })),
+        }
+    }
+
+    #[test]
+    fn resolve_base_bookmark_zero_ascendants_returns_trunk() {
+        let result = resolve_base_bookmark(&None, &[], "main");
+        assert!(matches!(result, ResolvedBaseBookmark::Resolved(name) if name == "main"));
+    }
+
+    #[test]
+    fn resolve_base_bookmark_single_ascendant() {
+        let ascendants = vec!["feature-a".to_string()];
+        let result = resolve_base_bookmark(&None, &ascendants, "main");
+        assert!(matches!(result, ResolvedBaseBookmark::Resolved(name) if name == "feature-a"));
+    }
+
+    #[test]
+    fn resolve_base_bookmark_multiple_ascendants_no_cr() {
+        let ascendants = vec!["feature-a".to_string(), "feature-b".to_string()];
+        let result = resolve_base_bookmark(&None, &ascendants, "main");
+        assert!(matches!(result, ResolvedBaseBookmark::NeedUserInput));
+    }
+
+    #[test]
+    fn resolve_base_bookmark_multiple_ascendants_cr_matches() {
+        let ascendants = vec!["feature-a".to_string(), "feature-b".to_string()];
+        let forge_meta = github_forge_meta("feature-b");
+        let result = resolve_base_bookmark(&Some(forge_meta), &ascendants, "main");
+        assert!(matches!(result, ResolvedBaseBookmark::Resolved(name) if name == "feature-b"));
+    }
+
+    #[test]
+    fn resolve_base_bookmark_multiple_ascendants_cr_no_match() {
+        let ascendants = vec!["feature-a".to_string(), "feature-b".to_string()];
+        let forge_meta = github_forge_meta("feature-c");
+        let result = resolve_base_bookmark(&Some(forge_meta), &ascendants, "main");
+        assert!(matches!(result, ResolvedBaseBookmark::NeedUserInput));
+    }
+
+    #[test]
+    fn resolve_base_bookmark_multiple_ascendants_forge_none() {
+        let ascendants = vec!["feature-a".to_string(), "feature-b".to_string()];
+        let forge_meta = ForgeMeta { forge: None };
+        let result = resolve_base_bookmark(&Some(forge_meta), &ascendants, "main");
+        assert!(matches!(result, ResolvedBaseBookmark::NeedUserInput));
     }
 }
