@@ -282,10 +282,6 @@ impl GitHubForge {
     }
 
     /// Execute a GraphQL request and return the raw response bytes.
-    ///
-    /// Separated into its own function so that the single `.await` in
-    /// `get_batch` only spans `Send`-safe types (no `Box<dyn ChangeRequest>`
-    /// held across the await boundary).
     async fn execute_graphql(
         client: &Octocrab,
         uri: http::Uri,
@@ -488,7 +484,7 @@ impl Forge for GitHubForge {
         &'a self,
         meta: &'a ForgeMeta,
         comment: &'a str,
-    ) -> BoxFuture<'a, Result<u64, Box<dyn std::error::Error>>> {
+    ) -> BoxFuture<'a, Result<u64, Box<dyn std::error::Error + Send + Sync>>> {
         Box::pin(async move {
             let gh = Self::extract_meta(meta)?;
             let issues_handler = self.client.issues(&self.owner, &self.repo);

@@ -418,7 +418,8 @@ async fn sync_bookmark(
 
         let crs: Vec<_> = forge_instance
             .find_change_requests(bookmark.name(), None)
-            .await?
+            .await
+            .map_err(|e| e as Box<dyn std::error::Error>)?
             .iter()
             .filter_map(|cr| {
                 // If --allow-inactive is not set, we remote change request being
@@ -444,7 +445,8 @@ async fn sync_bookmark(
         for source_id in &tracked_repo_ids {
             let crs: Vec<_> = forge_instance
                 .find_change_requests(bookmark.name(), Some(source_id))
-                .await?
+                .await
+                .map_err(|e| e as Box<dyn std::error::Error>)?
                 .iter()
                 .map(|cr| cr.to_forge_meta())
                 .collect();

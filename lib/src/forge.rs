@@ -14,10 +14,10 @@ use crate::protos::change_request::ForgeMeta;
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Shorthand for a single change-request result returned by [`Forge`] methods.
-type ForgeResult = Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error>>;
+type ForgeResult = Result<Box<dyn ChangeRequest>, Box<dyn std::error::Error + Send + Sync>>;
 
 /// Shorthand for a multi change-request result returned by [`Forge::find`].
-type ForgeResults = Result<Vec<Box<dyn ChangeRequest>>, Box<dyn std::error::Error>>;
+type ForgeResults = Result<Vec<Box<dyn ChangeRequest>>, Box<dyn std::error::Error + Send + Sync>>;
 
 /// Status of a change request on a forge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +44,7 @@ impl ChangeStatus {
 /// identity (from the proto metadata) with volatile data fetched from the API.
 /// The trait provides common accessors for display and a method to extract the
 /// persistable [`ForgeMeta`] for the store.
-pub trait ChangeRequest {
+pub trait ChangeRequest: Send {
     /// Persistable metadata for the store.
     fn to_forge_meta(&self) -> ForgeMeta;
 
@@ -174,7 +174,7 @@ pub trait Forge: Send + Sync {
         &'a self,
         meta: &'a ForgeMeta,
         comment: &'a str,
-    ) -> BoxFuture<'a, Result<u64, Box<dyn std::error::Error>>>;
+    ) -> BoxFuture<'a, Result<u64, Box<dyn std::error::Error + Send + Sync>>>;
 
     /// Find change requests matching `source_branch` and return persistable metadata.
     ///
@@ -194,40 +194,14 @@ pub trait Forge: Send + Sync {
     }
 }
 
-/// Wrapper that makes a `ForgeResult` `Send` by asserting it is safe.
-///
-/// `Box<dyn ChangeRequest>` and `Box<dyn Error>` lack `Send`, but in practice
-/// every forge implementation returns types that _are_ `Send`. This wrapper
-/// exists solely to satisfy the `Send` bound on `BoxFuture` for the default
-/// sequential `get_batch` implementation where results are accumulated across
-/// `await` boundaries.
-///
-/// # Safety
-///
-/// Only use this with `ForgeResult` values produced by `Forge::get`, which
-/// in practice always return `Send`-safe concrete types.
-struct SendForgeResult(ForgeResult);
-
-// SAFETY: see struct documentation above.
-unsafe impl Send for SendForgeResult {}
-
-impl SendForgeResult {
-    fn into_inner(self) -> ForgeResult {
-        self.0
-    }
-}
-
 /// Default sequential implementation of [`Forge::get_batch`].
 async fn sequential_get_batch<'a, F: Forge + ?Sized>(
     forge: &'a F,
     metas: Vec<&'a ForgeMeta>,
 ) -> Vec<ForgeResult> {
-    let mut results: Vec<SendForgeResult> = Vec::with_capacity(metas.len());
+    let mut results: Vec<ForgeResult> = Vec::with_capacity(metas.len());
     for meta in metas {
-        results.push(SendForgeResult(forge.get(meta).await));
+        results.push(forge.get(meta).await);
     }
     results
-        .into_iter()
-        .map(SendForgeResult::into_inner)
-        .collect()
 }

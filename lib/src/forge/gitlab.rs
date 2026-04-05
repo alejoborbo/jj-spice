@@ -483,7 +483,7 @@ impl Forge for GitLabForge {
         &'a self,
         meta: &'a ForgeMeta,
         comment: &'a str,
-    ) -> BoxFuture<'a, Result<u64, Box<dyn std::error::Error>>> {
+    ) -> BoxFuture<'a, Result<u64, Box<dyn std::error::Error + Send + Sync>>> {
         Box::pin(async move {
             let gl = Self::extract_meta(meta)?;
 

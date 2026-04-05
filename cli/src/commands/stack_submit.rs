@@ -121,7 +121,10 @@ pub async fn run(
         if let Some(forge_meta) = existing {
             match forge_meta.target_branch() {
                 Some(tb) if tb != base_bookmark => {
-                    let cr = forge.update_base(&forge_meta, &base_bookmark).await?;
+                    let cr = forge
+                        .update_base(&forge_meta, &base_bookmark)
+                        .await
+                        .map_err(|e| e as Box<dyn std::error::Error>)?;
                     state.set(meta.name.clone(), cr.to_forge_meta());
                     writeln!(
                         env.ui.stdout_formatter(),
@@ -188,7 +191,10 @@ pub async fn run(
             source_repo,
         };
 
-        let cr = forge.create(params).await?;
+        let cr = forge
+            .create(params)
+            .await
+            .map_err(|e| e as Box<dyn std::error::Error>)?;
         state.set(meta.name.clone(), cr.to_forge_meta());
 
         writeln!(
@@ -546,7 +552,7 @@ async fn post_stack_comments(
 
     // Collect results and update state with comment IDs.
     for (result, (name, _, _)) in results.into_iter().zip(&comment_tasks) {
-        let comment_id = result?;
+        let comment_id = result.map_err(|e| e as Box<dyn std::error::Error>)?;
         let mut updated_meta = state
             .get(name)
             .ok_or_else(|| format!("no change request found for bookmark '{name}'"))?
@@ -582,7 +588,8 @@ async fn get_existing_change_request(
     // Query the forge.
     let metas = forge
         .find_change_requests(bookmark, source_repo)
-        .await?
+        .await
+        .map_err(|e| e as Box<dyn std::error::Error>)?
         .iter()
         .filter_map(|cr| {
             // If --allow-inactive is not set, we remote change request being
