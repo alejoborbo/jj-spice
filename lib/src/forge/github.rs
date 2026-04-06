@@ -522,6 +522,39 @@ impl Forge for GitHubForge {
         })
     }
 
+    fn sync_fork<'a>(
+        &'a self,
+        branch: &'a str,
+    ) -> BoxFuture<'a, Result<bool, Box<dyn std::error::Error + Send + Sync>>> {
+        Box::pin(async move {
+            let route = format!("/repos/{}/{}/merge-upstream", self.owner, self.repo);
+            let body = serde_json::json!({ "branch": branch });
+
+            let response = self.client._post(route, Some(&body)).await.map_err(
+                |e| -> Box<dyn std::error::Error + Send + Sync> {
+                    format!("merge-upstream request failed: {e}").into()
+                },
+            )?;
+
+            let status = response.status();
+            match status.as_u16() {
+                200 => Ok(true),
+                // 409 = merge conflict, 422 = cannot sync (not a fork, etc.)
+                409 | 422 => {
+                    let collected = response.into_body().collect().await.map_err(
+                        |e| -> Box<dyn std::error::Error + Send + Sync> {
+                            format!("failed to read merge-upstream response: {e}").into()
+                        },
+                    )?;
+                    let bytes = collected.to_bytes();
+                    let body_str = String::from_utf8_lossy(&bytes);
+                    Err(format!("merge-upstream {status}: {body_str}").into())
+                }
+                other => Err(format!("merge-upstream unexpected status: {other}").into()),
+            }
+        })
+    }
+
     fn get_batch<'a>(&'a self, metas: Vec<&'a ForgeMeta>) -> BoxFuture<'a, Vec<ForgeResult>> {
         Box::pin(async move {
             if metas.is_empty() {
@@ -1496,5 +1529,81 @@ mod tests {
         let forge = mock_forge("http://unused");
         let head = forge.format_head_ref("feat", None);
         assert_eq!(head, format!("{OWNER}:feat"));
+    }
+
+    // -- sync_fork tests --
+
+    #[tokio::test]
+    async fn sync_fork_returns_true_on_success() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/merge-upstream")))
+            .and(wiremock::matchers::body_partial_json(
+                json!({"branch": "main"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "message": "Successfully fetched and fast-forwarded from upstream.",
+                "merge_type": "fast-forward",
+                "base_branch": format!("{OWNER}:{REPO}:refs/heads/main")
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let forge = mock_forge(&mock_server.uri());
+        let result = forge.sync_fork("main").await.unwrap();
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn sync_fork_returns_true_when_already_up_to_date() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/merge-upstream")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "message": "This branch is not behind the upstream.",
+                "merge_type": "none",
+                "base_branch": format!("{OWNER}:{REPO}:refs/heads/main")
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let forge = mock_forge(&mock_server.uri());
+        let result = forge.sync_fork("main").await.unwrap();
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn sync_fork_returns_error_on_conflict() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/merge-upstream")))
+            .respond_with(
+                ResponseTemplate::new(409).set_body_json(json!({"message": "Merge conflict"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let forge = mock_forge(&mock_server.uri());
+        let result = forge.sync_fork("main").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("409"));
+    }
+
+    #[tokio::test]
+    async fn sync_fork_returns_error_on_unprocessable() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(format!("/repos/{OWNER}/{REPO}/merge-upstream")))
+            .respond_with(
+                ResponseTemplate::new(422)
+                    .set_body_json(json!({"message": "Repository is not a fork"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let forge = mock_forge(&mock_server.uri());
+        let result = forge.sync_fork("main").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("422"));
     }
 }

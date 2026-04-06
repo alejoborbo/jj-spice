@@ -2,12 +2,16 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
 
-use jj_cli::git_util::GitSubprocessUi;
+use jj_cli::git_util::{GitSubprocessUi, print_push_stats};
 use jj_cli::ui::Ui;
 use jj_lib::backend::CommitId;
 use jj_lib::config::{ConfigFile, ConfigSource};
-use jj_lib::git::{GitFetch, GitFetchRefExpression, GitImportOptions, expand_fetch_refspecs};
-use jj_lib::ref_name::{RefName, RemoteName};
+use jj_lib::git::{
+    self, GitBranchPushTargets, GitFetch, GitFetchRefExpression, GitImportOptions,
+    expand_fetch_refspecs,
+};
+use jj_lib::ref_name::{RefName, RefNameBuf, RemoteName};
+use jj_lib::refs::classify_bookmark_push_action;
 use jj_lib::repo::{ReadonlyRepo, Repo};
 use jj_lib::revset::ResolvedRevsetExpression;
 use jj_lib::rewrite::{
@@ -64,10 +68,29 @@ pub async fn run(
     // Prompt for unmatched remotes (grouped by hostname).
     resolve_unmatched_remotes(env, &unmatched, &mut forges)?;
 
+    // Resolve fork sync: --sync-fork[=bool] > config > false.
+    let sync_fork_enabled = args.sync_fork.unwrap_or_else(|| {
+        env.config()
+            .get::<bool>(["spice", "sync-fork"])
+            .unwrap_or(false)
+    });
+
+    let fork_synced = if sync_fork_enabled {
+        sync_fork_server_side(env, &forges, trunk_name).await?
+    } else {
+        false
+    };
+
     // Fetch the latest remote changes for the trunk branch.
     // The returned repo reflects the fetched state so subsequent operations
     // see the up-to-date trunk.
     let repo_after_fetch = fetch_trunk(env, trunk_name)?;
+
+    // If fork sync is enabled but the forge did not support server-side
+    // sync, push the freshly-fetched trunk to the fork remote instead.
+    if sync_fork_enabled && !fork_synced && env.is_fork_mode() {
+        push_trunk_to_fork(env, &repo_after_fetch, trunk_name)?;
+    }
 
     // Re-resolve trunk from the updated view — the bookmark may have advanced
     // after the fetch (e.g. new merge commits on main).
@@ -335,6 +358,118 @@ fn fetch_trunk(
     }
 
     Ok(tx.commit("fetch trunk")?)
+}
+
+/// Try to sync the fork's trunk branch via the forge API (server-side).
+///
+/// In fork mode, the forge attached to the push remote (the fork) is asked
+/// to fast-forward its branch to match upstream. Returns `true` when the
+/// server-side sync succeeded (or the branch was already up-to-date),
+/// `false` when no forge was found for the push remote or the forge does
+/// not support server-side syncing.
+async fn sync_fork_server_side(
+    env: &SpiceEnv,
+    forges: &HashMap<String, Box<dyn Forge>>,
+    trunk_name: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if !env.is_fork_mode() {
+        return Ok(false);
+    }
+
+    let push_remote = env.get_default_remote();
+    let fork_forge = match forges.get(push_remote.as_str()) {
+        Some(f) => f,
+        None => return Ok(false),
+    };
+
+    match fork_forge.sync_fork(trunk_name).await {
+        Ok(true) => {
+            writeln!(
+                env.ui.status(),
+                "Fork synced with upstream (server-side, {})",
+                push_remote.as_str(),
+            )?;
+            Ok(true)
+        }
+        Ok(false) => {
+            // Forge does not support server-side sync — caller will fall back.
+            Ok(false)
+        }
+        Err(e) => {
+            writeln!(
+                env.ui.warning_default(),
+                "Could not sync fork via API: {e} (will push locally instead)"
+            )?;
+            Ok(false)
+        }
+    }
+}
+
+/// Push the local trunk to the fork remote so it stays up-to-date.
+///
+/// Used as a fallback when the forge does not support server-side fork
+/// syncing (e.g. GitLab). The push is a fast-forward of the fork's trunk
+/// bookmark to match the locally-fetched upstream state.
+fn push_trunk_to_fork(
+    env: &SpiceEnv,
+    repo: &Arc<ReadonlyRepo>,
+    trunk_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use jj_lib::ref_name::RemoteRefSymbol;
+    use jj_lib::refs::LocalAndRemoteRef;
+
+    let push_remote = env.get_default_remote();
+
+    let ref_name = RefName::new(trunk_name);
+    let local_target = repo.view().get_local_bookmark(ref_name);
+    let remote_ref = repo.view().get_remote_bookmark(RemoteRefSymbol {
+        name: ref_name,
+        remote: &push_remote,
+    });
+    let action = classify_bookmark_push_action(LocalAndRemoteRef {
+        local_target,
+        remote_ref,
+    });
+
+    let update = match action {
+        jj_lib::refs::BookmarkPushAction::Update(update) => update,
+        // Already up-to-date or would need force — skip silently.
+        _ => return Ok(()),
+    };
+
+    let targets = GitBranchPushTargets {
+        branch_updates: vec![(RefNameBuf::from(trunk_name), update)],
+    };
+
+    let mut tx = repo.start_transaction();
+    let stats = git::push_branches(
+        tx.repo_mut(),
+        env.git_settings.to_subprocess_options(),
+        push_remote.as_ref(),
+        &targets,
+        &mut GitSubprocessUi::new(&env.ui),
+    )?;
+
+    print_push_stats(&env.ui, &stats)?;
+    if stats.all_ok() {
+        tx.commit(format!(
+            "push {trunk_name} to {remote}",
+            remote = push_remote.as_str()
+        ))?;
+        writeln!(
+            env.ui.status(),
+            "Fork synced with upstream (pushed {trunk_name} to {})",
+            push_remote.as_str(),
+        )?;
+    } else {
+        writeln!(
+            env.ui.warning_default(),
+            "Failed to push {trunk_name} to {} — fork may be out-of-date",
+            push_remote.as_str(),
+        )?;
+    }
+
+    Ok(())
 }
 
 /// Restack the bookmark graph on top of the trunk branch.

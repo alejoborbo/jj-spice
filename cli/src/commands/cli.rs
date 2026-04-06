@@ -162,6 +162,8 @@ pub struct SubmitArgs {
 #[derive(Args, Clone, Debug)]
 #[command(after_long_help = config_after_help(&[
     ("spice.auto-clean", "Remove stale/inactive CRs from tracking automatically (bool, default: true)."),
+    ("spice.sync-fork",  "Sync the fork's trunk with upstream during `stack sync` (bool, default: false).\n\
+                          Equivalent to --sync-fork."),
 ]))]
 pub struct SyncArgs {
     /// Re-discover change requests even for bookmarks that are already tracked.
@@ -180,6 +182,23 @@ pub struct SyncArgs {
     /// By default, latest version of the trunk is fetched, but the stack is not rebased.
     #[arg(long)]
     pub restack: bool,
+    /// Sync the fork's trunk branch with upstream.
+    ///
+    /// In fork mode, syncs the fork's default branch with upstream via
+    /// the forge API (GitHub) or a local push (GitLab / other forges)
+    /// so the fork stays up-to-date.
+    ///
+    /// Use `--sync-fork` or `--sync-fork=true` to enable,
+    /// `--sync-fork=false` to disable (overrides config).
+    ///
+    /// [config: `spice.sync-fork`]
+    #[arg(
+        long,
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+    )]
+    pub sync_fork: Option<bool>,
 }
 
 /// Arguments for `jj-spice stack untrack`.
@@ -356,6 +375,50 @@ mod tests {
             SpiceCommand::Stack(StackArgs {
                 command: StackCommand::Sync(args),
             }) => assert!(!args.force),
+            _ => panic!("expected Sync"),
+        }
+    }
+
+    #[test]
+    fn parse_stack_sync_absent_sync_fork_is_none() {
+        let cli = Cli::try_parse_from(["jj-spice", "stack", "sync"]).unwrap();
+        match cli.command {
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Sync(args),
+            }) => assert_eq!(args.sync_fork, None),
+            _ => panic!("expected Sync"),
+        }
+    }
+
+    #[test]
+    fn parse_stack_sync_bare_sync_fork_is_true() {
+        let cli = Cli::try_parse_from(["jj-spice", "stack", "sync", "--sync-fork"]).unwrap();
+        match cli.command {
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Sync(args),
+            }) => assert_eq!(args.sync_fork, Some(true)),
+            _ => panic!("expected Sync"),
+        }
+    }
+
+    #[test]
+    fn parse_stack_sync_sync_fork_eq_true() {
+        let cli = Cli::try_parse_from(["jj-spice", "stack", "sync", "--sync-fork=true"]).unwrap();
+        match cli.command {
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Sync(args),
+            }) => assert_eq!(args.sync_fork, Some(true)),
+            _ => panic!("expected Sync"),
+        }
+    }
+
+    #[test]
+    fn parse_stack_sync_sync_fork_eq_false() {
+        let cli = Cli::try_parse_from(["jj-spice", "stack", "sync", "--sync-fork=false"]).unwrap();
+        match cli.command {
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Sync(args),
+            }) => assert_eq!(args.sync_fork, Some(false)),
             _ => panic!("expected Sync"),
         }
     }

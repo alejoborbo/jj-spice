@@ -15,6 +15,7 @@ For details on how jj resolves its configuration, see the
 | [`spice.output`](#spiceoutput) | `"modern"` \| `"classic"` | `"modern"` | -- |
 | [`spice.auto-accept-changes`](#spiceauto-accept-changes) | `bool` | `false` | `--auto-accept` |
 | [`spice.auto-clean`](#spiceauto-clean) | `bool` | `true` | -- |
+| [`spice.sync-fork`](#spicesync-fork) | `bool` | `false` | `--sync-fork` |
 | [`spice.upstream-remote`](#spiceupstream-remote) | `string` | auto-detected | -- |
 | [`spice.forges.<hostname>.type`](#spiceforgeshostnametype) | `"github"` \| `"gitlab"` | auto-detected | -- |
 
@@ -67,6 +68,29 @@ auto-clean = false
 ```
 
 **Affects:** `stack submit`, `stack sync`.
+
+## `spice.sync-fork`
+
+When `true`, `stack sync` syncs the fork's trunk branch with upstream so the
+fork stays up-to-date on the remote side (not just locally).
+
+On GitHub the sync is performed server-side via the
+`POST /repos/{owner}/{repo}/merge-upstream` API. On GitLab and other forges
+that lack an equivalent endpoint, the freshly-fetched upstream trunk is
+pushed to the fork remote instead.
+
+Only takes effect when fork mode is active (two distinct remotes: push
+remote + upstream remote).
+
+Equivalent to passing `--sync-fork` on the command line. The CLI flag
+takes precedence when used.
+
+```toml
+[spice]
+sync-fork = true
+```
+
+**Affects:** `stack sync`.
 
 ## `spice.upstream-remote`
 

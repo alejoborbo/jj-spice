@@ -176,6 +176,21 @@ pub trait Forge: Send + Sync {
         comment: &'a str,
     ) -> BoxFuture<'a, Result<u64, Box<dyn std::error::Error + Send + Sync>>>;
 
+    /// Sync the fork's branch with the upstream repository on the server side.
+    ///
+    /// Forges that support a native "merge upstream" API (e.g. GitHub) override
+    /// this to fast-forward or merge the fork's branch without a local push.
+    ///
+    /// Returns `Ok(true)` when the sync was performed (or the branch was
+    /// already up-to-date), `Ok(false)` when the forge does not support
+    /// server-side fork syncing (caller should fall back to a local push).
+    fn sync_fork<'a>(
+        &'a self,
+        _branch: &'a str,
+    ) -> BoxFuture<'a, Result<bool, Box<dyn std::error::Error + Send + Sync>>> {
+        Box::pin(async { Ok(false) })
+    }
+
     /// Find change requests matching `source_branch` and return persistable metadata.
     ///
     /// This is a convenience wrapper around [`Forge::find`] that extracts
