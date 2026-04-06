@@ -73,12 +73,11 @@ pub async fn run(
     let text_editor = TextEditor::from_settings(&env.settings)?;
     let mut state = cr_store.load()?;
 
-    let auto_accept =
-        if let Ok(auto_accept) = env.config().get::<bool>(["spice", "auto-accept-changes"]) {
-            auto_accept
-        } else {
-            args.auto_accept
-        };
+    let auto_accept = args.auto_accept.unwrap_or_else(|| {
+        env.config()
+            .get::<bool>(["spice", "auto-accept-changes"])
+            .unwrap_or(false)
+    });
 
     // Auto-clean: when enabled, inactive (closed/merged) CRs discovered in
     // local state are automatically removed so a fresh CR can be created.
@@ -180,12 +179,9 @@ pub async fn run(
             |input| -> Result<String, &'static str> { Ok(input.to_string()) },
         )?;
         let description = text_editor.edit_str(&suggested_body, Some(".md"))?;
-        let is_draft = if args.draft {
-            true
-        } else if args.no_draft {
-            false
-        } else {
-            env.ui.prompt_yes_no("Draft?", Some(false))?
+        let is_draft = match args.draft {
+            Some(d) => d,
+            None => env.ui.prompt_yes_no("Draft?", Some(false))?,
         };
 
         let params = CreateParams {

@@ -136,11 +136,18 @@ pub struct SubmitArgs {
     /// Auto accepts pushing untracked changes.
     ///
     /// By default, the user will be prompted if some changes are untracked.
-    /// If the --auto-accept flag is passed, untracked changes will be automatically pushed.
+    ///
+    /// Use `--auto-accept` or `--auto-accept=true` to enable,
+    /// `--auto-accept=false` to disable (overrides config).
     ///
     /// [config: `spice.auto-accept-changes`]
-    #[arg(long)]
-    pub auto_accept: bool,
+    #[arg(
+        long,
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+    )]
+    pub auto_accept: Option<bool>,
     /// Auto track bookmarks
     ///
     /// When a bookmark has no remote, allow them to be tracked directly when submitting changes.
@@ -148,14 +155,17 @@ pub struct SubmitArgs {
     pub auto_track_bookmarks: bool,
     /// Set the change request in draft state.
     ///
-    /// By default, the user is prompt to choose the CR state.
-    #[arg(long, conflicts_with = "no_draft")]
-    pub draft: bool,
-    /// Set the change request in non-draft state.
+    /// By default, the user is prompted to choose the CR state.
     ///
-    /// By default, the user is prompt to choose the CR state.
-    #[arg(long, conflicts_with = "draft")]
-    pub no_draft: bool,
+    /// Use `--draft` or `--draft=true` for draft,
+    /// `--draft=false` for non-draft.
+    #[arg(
+        long,
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+    )]
+    pub draft: Option<bool>,
 }
 
 /// Arguments for `jj-spice stack sync`.
@@ -347,6 +357,89 @@ mod tests {
                 command: StackCommand::Submit(_)
             })
         ));
+    }
+
+    // -- auto_accept tests --
+
+    #[test]
+    fn parse_submit_absent_auto_accept_is_none() {
+        let cli = Cli::try_parse_from(["jj-spice", "stack", "submit"]).unwrap();
+        match cli.command {
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Submit(args),
+            }) => assert_eq!(args.auto_accept, None),
+            _ => panic!("expected Submit"),
+        }
+    }
+
+    #[test]
+    fn parse_submit_bare_auto_accept_is_true() {
+        let cli = Cli::try_parse_from(["jj-spice", "stack", "submit", "--auto-accept"]).unwrap();
+        match cli.command {
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Submit(args),
+            }) => assert_eq!(args.auto_accept, Some(true)),
+            _ => panic!("expected Submit"),
+        }
+    }
+
+    #[test]
+    fn parse_submit_auto_accept_eq_true() {
+        let cli =
+            Cli::try_parse_from(["jj-spice", "stack", "submit", "--auto-accept=true"]).unwrap();
+        match cli.command {
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Submit(args),
+            }) => assert_eq!(args.auto_accept, Some(true)),
+            _ => panic!("expected Submit"),
+        }
+    }
+
+    #[test]
+    fn parse_submit_auto_accept_eq_false() {
+        let cli =
+            Cli::try_parse_from(["jj-spice", "stack", "submit", "--auto-accept=false"]).unwrap();
+        match cli.command {
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Submit(args),
+            }) => assert_eq!(args.auto_accept, Some(false)),
+            _ => panic!("expected Submit"),
+        }
+    }
+
+    // -- draft tests --
+
+    #[test]
+    fn parse_submit_absent_draft_is_none() {
+        let cli = Cli::try_parse_from(["jj-spice", "stack", "submit"]).unwrap();
+        match cli.command {
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Submit(args),
+            }) => assert_eq!(args.draft, None),
+            _ => panic!("expected Submit"),
+        }
+    }
+
+    #[test]
+    fn parse_submit_bare_draft_is_true() {
+        let cli = Cli::try_parse_from(["jj-spice", "stack", "submit", "--draft"]).unwrap();
+        match cli.command {
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Submit(args),
+            }) => assert_eq!(args.draft, Some(true)),
+            _ => panic!("expected Submit"),
+        }
+    }
+
+    #[test]
+    fn parse_submit_draft_eq_false() {
+        let cli = Cli::try_parse_from(["jj-spice", "stack", "submit", "--draft=false"]).unwrap();
+        match cli.command {
+            SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Submit(args),
+            }) => assert_eq!(args.draft, Some(false)),
+            _ => panic!("expected Submit"),
+        }
     }
 
     #[test]
