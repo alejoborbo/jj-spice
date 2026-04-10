@@ -8,12 +8,14 @@ use jj_lib::{
     backend::CommitId,
     dag_walk::topo_order_forward,
     graph::{GraphEdge, GraphNode, reverse_graph},
+    op_store::LocalRemoteRefTarget,
+    ref_name::RefName,
     repo::Repo,
     revset::{ResolvedRevsetExpression, RevsetEvaluationError, RevsetExpression},
 };
 use thiserror::Error;
 
-use super::{Bookmark, resolve_commit_id};
+use super::Bookmark;
 
 /// Nodes keyed by bookmark name and their outgoing edges, as built by
 /// [`BookmarkGraph::build_bookmark_graph`].
@@ -297,19 +299,7 @@ impl<'a> BookmarkGraph<'a> {
     fn build_bookmark_commit_map(
         repo: &'a (dyn Repo + 'a),
     ) -> HashMap<CommitId, Vec<Arc<Bookmark<'a>>>> {
-        repo.view()
-            .bookmarks()
-            .filter_map(|(ref_name, ref_target)| {
-                // Resolve via local target first, falling back to remote refs.
-                // This handles bookmarks that only exist as remote-tracking
-                // refs (e.g. main@origin with no local main).
-                let commit_id = resolve_commit_id(&ref_target)?;
-                Some((
-                    commit_id.to_owned(),
-                    Arc::new(Bookmark::new(ref_name.as_str().to_string(), ref_target)),
-                ))
-            })
-            .into_group_map()
+        collect_local_bookmarks(repo.view().bookmarks())
     }
 
     fn find_head_commits(reversed: &[GraphNode<CommitId>]) -> Vec<&CommitId> {
@@ -456,10 +446,30 @@ impl<'a> BookmarkGraph<'a> {
     }
 }
 
+/// Collect bookmarks that have a local target into a commit→bookmark map.
+///
+/// Remote-only bookmarks (from other contributors) are excluded.  Trunk
+/// resolution uses [`super::resolve_commit_id`] separately and does fall
+/// back to remotes.
+fn collect_local_bookmarks<'a>(
+    bookmarks: impl Iterator<Item = (&'a RefName, LocalRemoteRefTarget<'a>)>,
+) -> HashMap<CommitId, Vec<Arc<Bookmark<'a>>>> {
+    bookmarks
+        .filter_map(|(ref_name, ref_target)| {
+            let commit_id = ref_target.local_target.as_normal()?;
+            Some((
+                commit_id.to_owned(),
+                Arc::new(Bookmark::new(ref_name.as_str().to_string(), ref_target)),
+            ))
+        })
+        .into_group_map()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jj_lib::op_store::{LocalRemoteRefTarget, RefTarget};
+    use jj_lib::op_store::{LocalRemoteRefTarget, RefTarget, RemoteRef, RemoteRefState};
+    use jj_lib::ref_name::RemoteName;
 
     fn commit_id(byte: u8) -> CommitId {
         CommitId::new(vec![byte])
@@ -1149,5 +1159,113 @@ mod tests {
         assert_eq!(graph.root_bookmarks(), &expected[..]);
         // "base" has "head" as ascendant, so only "head" is a root.
         assert_eq!(graph.root_bookmarks(), &["head"]);
+    }
+
+    // -- collect_local_bookmarks tests --
+
+    fn make_remote_ref_at(id: &CommitId, tracked: bool) -> RemoteRef {
+        RemoteRef {
+            target: RefTarget::normal(id.clone()),
+            state: if tracked {
+                RemoteRefState::Tracked
+            } else {
+                RemoteRefState::New
+            },
+        }
+    }
+
+    #[test]
+    fn collect_local_bookmarks_includes_local_bookmark() {
+        let id = commit_id(1);
+        let local = RefTarget::normal(id.clone());
+        let entries: Vec<(&RefName, LocalRemoteRefTarget)> = vec![(
+            RefName::new("feat"),
+            LocalRemoteRefTarget {
+                local_target: &local,
+                remote_refs: vec![],
+            },
+        )];
+
+        let map = collect_local_bookmarks(entries.into_iter());
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&id));
+        assert_eq!(map[&id][0].name(), "feat");
+    }
+
+    #[test]
+    fn collect_local_bookmarks_excludes_remote_only_bookmark() {
+        // Regression test for #63: a bookmark that exists only as a
+        // remote-tracking ref (no local target) must not appear in
+        // the commit map — otherwise `stack log` shows every
+        // contributor's bookmarks.
+        let id = commit_id(1);
+        let remote = make_remote_ref_at(&id, true);
+        let entries: Vec<(&RefName, LocalRemoteRefTarget)> = vec![(
+            RefName::new("someone-elses-branch"),
+            LocalRemoteRefTarget {
+                local_target: RefTarget::absent_ref(),
+                remote_refs: vec![(RemoteName::new("origin"), &remote)],
+            },
+        )];
+
+        let map = collect_local_bookmarks(entries.into_iter());
+        assert!(map.is_empty(), "remote-only bookmark should be excluded");
+    }
+
+    #[test]
+    fn collect_local_bookmarks_mixed_local_and_remote_only() {
+        // Local bookmark "my-feat" should appear, remote-only
+        // "their-feat" should not.
+        let local_id = commit_id(1);
+        let remote_id = commit_id(2);
+        let local_target = RefTarget::normal(local_id.clone());
+        let remote_ref = make_remote_ref_at(&remote_id, true);
+
+        let entries: Vec<(&RefName, LocalRemoteRefTarget)> = vec![
+            (
+                RefName::new("my-feat"),
+                LocalRemoteRefTarget {
+                    local_target: &local_target,
+                    remote_refs: vec![],
+                },
+            ),
+            (
+                RefName::new("their-feat"),
+                LocalRemoteRefTarget {
+                    local_target: RefTarget::absent_ref(),
+                    remote_refs: vec![(RemoteName::new("origin"), &remote_ref)],
+                },
+            ),
+        ];
+
+        let map = collect_local_bookmarks(entries.into_iter());
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(&local_id));
+        assert!(!map.contains_key(&remote_id));
+        assert_eq!(map[&local_id][0].name(), "my-feat");
+    }
+
+    #[test]
+    fn collect_local_bookmarks_local_with_remote_tracking() {
+        // A bookmark that has both a local target and remote tracking
+        // should be included (resolved via the local target).
+        let local_id = commit_id(10);
+        let remote_id = commit_id(20);
+        let local_target = RefTarget::normal(local_id.clone());
+        let remote_ref = make_remote_ref_at(&remote_id, true);
+
+        let entries: Vec<(&RefName, LocalRemoteRefTarget)> = vec![(
+            RefName::new("feat"),
+            LocalRemoteRefTarget {
+                local_target: &local_target,
+                remote_refs: vec![(RemoteName::new("origin"), &remote_ref)],
+            },
+        )];
+
+        let map = collect_local_bookmarks(entries.into_iter());
+        assert_eq!(map.len(), 1);
+        // Resolved via local target, not remote.
+        assert!(map.contains_key(&local_id));
+        assert!(!map.contains_key(&remote_id));
     }
 }
