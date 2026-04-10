@@ -450,17 +450,80 @@ impl<'a> BookmarkGraph<'a> {
 
 #[cfg(test)]
 impl<'a> BookmarkGraph<'a> {
-    /// Build a minimal graph for unit-testing code that reads
-    /// `root_bookmarks` and `descendants_for()` (e.g. `Comment::to_string`).
-    pub(crate) fn for_testing(
-        root_bookmarks: Vec<String>,
-        descendants: BTreeMap<String, Vec<GraphEdge<String>>>,
-    ) -> Self {
+    /// Build a fully-wired graph for unit tests.
+    ///
+    /// `node_names` lists bookmarks that exist in the graph but may
+    /// have no edges (e.g. a single standalone bookmark).
+    /// `edges_list` contains `(child, parent)` pairs; both names are
+    /// added to the graph automatically.
+    ///
+    /// Bookmark nodes, head/root bookmarks, and descendants are all
+    /// derived so that [`Self::iter_graph`] works.
+    pub(crate) fn for_testing(node_names: Vec<&str>, edges_list: Vec<(&str, &str)>) -> Self {
+        use jj_lib::op_store::{LocalRemoteRefTarget, RefTarget};
+
+        let mut edges: BTreeMap<String, Vec<GraphEdge<String>>> = BTreeMap::new();
+        let mut descendants: BTreeMap<String, Vec<GraphEdge<String>>> = BTreeMap::new();
+        let mut all_names: HashSet<String> = HashSet::new();
+
+        for name in node_names {
+            all_names.insert(name.to_string());
+        }
+
+        for (child, parent) in &edges_list {
+            all_names.insert(child.to_string());
+            all_names.insert(parent.to_string());
+
+            let edge_list = edges.entry(child.to_string()).or_default();
+            if !edge_list.iter().any(|e| e.target == *parent) {
+                edge_list.push(GraphEdge::direct(parent.to_string()));
+            }
+
+            let desc_list = descendants.entry(parent.to_string()).or_default();
+            if !desc_list.iter().any(|e| e.target == *child) {
+                desc_list.push(GraphEdge::direct(child.to_string()));
+            }
+        }
+
+        // Ensure every name has an edges entry (even if empty).
+        for name in &all_names {
+            edges.entry(name.clone()).or_default();
+        }
+
+        // Build minimal BookmarkNodes with absent ref target.
+        let mut nodes: BTreeMap<String, BookmarkNode> = BTreeMap::new();
+        for name in &all_names {
+            let bookmark = super::Bookmark::new(
+                name.clone(),
+                LocalRemoteRefTarget {
+                    local_target: RefTarget::absent_ref(),
+                    remote_refs: vec![],
+                },
+            );
+            nodes.insert(name.clone(), BookmarkNode::new(bookmark));
+        }
+
+        let head_bookmarks = Self::find_head_bookmarks(&edges);
+
+        // Populate ascendants from edges (child → parent means parent
+        // is an ascendant of child in the bookmark graph's convention).
+        for (name, edge_list) in &edges {
+            for edge in edge_list {
+                if let Some(node) = nodes.get_mut(name)
+                    && !node.ascendants.contains(&edge.target)
+                {
+                    node.ascendants.push(edge.target.clone());
+                }
+            }
+        }
+
+        let root_bookmarks = Self::find_root_bookmarks(&nodes);
+
         Self {
-            nodes: BTreeMap::new(),
-            edges: BTreeMap::new(),
+            nodes,
+            edges,
             descendants,
-            head_bookmarks: Vec::new(),
+            head_bookmarks,
             root_bookmarks,
         }
     }
