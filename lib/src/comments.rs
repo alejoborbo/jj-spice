@@ -35,10 +35,6 @@ pub enum CommentError {
     NoChangeRequestFound(String),
     #[error("No forge metadata found for bookmark {0}")]
     NoForgeMetadataFound(String),
-    #[error("No base branch found)")]
-    NoBaseBranchFound,
-    #[error("No target branch found)")]
-    NoTargetBranchFound,
 }
 
 /// Renders a stack-trace comment for a change request.
@@ -91,8 +87,7 @@ impl<'a> Comment<'a> {
     /// vertical graph with Unicode box-drawing characters, bookmark nodes
     /// rendered top-to-bottom (leaf first, root last, trunk at bottom).
     pub fn to_string(&self) -> Result<String, CommentError> {
-        let ascendant_to_crs = self.build_ascendant_map()?;
-        let ordered = self.collect_ordered_nodes(&ascendant_to_crs)?;
+        let ordered = self.collect_ordered_nodes()?;
 
         let mut output = String::from("This change belongs to the following stack:\n<pre>\n");
 
@@ -135,65 +130,36 @@ impl<'a> Comment<'a> {
     }
 
     /// Collect nodes in reversed topological order (leaf-first, root-last).
-    fn collect_ordered_nodes(
-        &self,
-        ascendant_to_crs: &BTreeMap<String, Vec<&ForgeMeta>>,
-    ) -> Result<Vec<CommentNode>, CommentError> {
-        let mut nodes = Vec::new();
-        let mut visited = Vec::new();
-
-        let mut stack: Vec<&ForgeMeta> = self
+    ///
+    /// Delegates to [`BookmarkGraph::iter_graph`] for the topological
+    /// ordering, then reverses so leaves appear first (matching the
+    /// visual layout where the tip of the stack is at the top).
+    fn collect_ordered_nodes(&self) -> Result<Vec<CommentNode>, CommentError> {
+        let topo_names: Vec<&str> = self
             .graph
-            .root_bookmarks
-            .iter()
-            .map(|b| {
-                self.change_requests
-                    .get(b)
-                    .ok_or_else(|| CommentError::NoChangeRequestFound(b.clone()))
+            .iter_graph()
+            .map_err(|_| CommentError::NoChangeRequestFound("(cycle)".into()))?
+            .map(|node| node.name())
+            .collect();
+
+        let nodes: Vec<CommentNode> = topo_names
+            .into_iter()
+            .rev()
+            .map(|name| {
+                let meta = self
+                    .change_requests
+                    .get(name)
+                    .ok_or_else(|| CommentError::NoChangeRequestFound(name.to_string()))?;
+                let (cr_label, cr_url) = Self::extract_cr_info(meta);
+                Ok(CommentNode {
+                    source_branch: name.to_string(),
+                    cr_label,
+                    cr_url,
+                })
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<_, _>>()?;
 
-        while let Some(meta) = stack.pop() {
-            if visited.contains(&meta) {
-                continue;
-            }
-            visited.push(meta);
-
-            let source_branch = meta
-                .source_branch()
-                .ok_or(CommentError::NoTargetBranchFound)?;
-
-            let (cr_label, cr_url) = Self::extract_cr_info(meta);
-
-            nodes.push(CommentNode {
-                source_branch: source_branch.to_string(),
-                cr_label,
-                cr_url,
-            });
-
-            for next in ascendant_to_crs.get(source_branch).unwrap_or(&vec![]) {
-                stack.push(next);
-            }
-        }
-
-        // Reverse: DFS from roots produces root-first, we want leaf-first.
-        nodes.reverse();
         Ok(nodes)
-    }
-
-    /// Build a map from ascendant bookmark name to its descendant ForgeMeta entries.
-    fn build_ascendant_map(&self) -> Result<BTreeMap<String, Vec<&ForgeMeta>>, CommentError> {
-        let mut map: BTreeMap<String, Vec<&ForgeMeta>> = BTreeMap::new();
-        for meta in self.change_requests.by_bookmark.values() {
-            let target_branch = meta
-                .target_branch()
-                .ok_or(CommentError::NoBaseBranchFound)?;
-
-            if self.change_requests.get(target_branch).is_some() {
-                map.entry(target_branch.to_string()).or_default().push(meta);
-            }
-        }
-        Ok(map)
     }
 
     /// Format a CR reference as a clickable `<a>` tag.
@@ -381,7 +347,7 @@ mod tests {
     #[test]
     fn single_bookmark_graph() {
         let bookmark = make_bookmark("feat-a");
-        let graph = BookmarkGraph::for_testing(vec!["feat-a".into()], BTreeMap::new());
+        let graph = BookmarkGraph::for_testing(vec!["feat-a"], vec![]);
         let crs = make_change_requests(vec![("feat-a", 1, "main")]);
 
         let comment = Comment::new(&bookmark, &graph, &crs).with_trunk("main");
@@ -400,7 +366,7 @@ mod tests {
     #[test]
     fn linear_stack_ordering() {
         let current = make_bookmark("mid");
-        let graph = BookmarkGraph::for_testing(vec!["root".into()], BTreeMap::new());
+        let graph = BookmarkGraph::for_testing(vec![], vec![("leaf", "mid"), ("mid", "root")]);
         let crs = make_change_requests(vec![
             ("root", 10, "main"),
             ("mid", 11, "root"),
@@ -427,7 +393,7 @@ mod tests {
     #[test]
     fn current_bookmark_is_root() {
         let current = make_bookmark("root");
-        let graph = BookmarkGraph::for_testing(vec!["root".into()], BTreeMap::new());
+        let graph = BookmarkGraph::for_testing(vec![], vec![("child", "root")]);
         let crs = make_change_requests(vec![("root", 1, "main"), ("child", 2, "root")]);
 
         let comment = Comment::new(&current, &graph, &crs).with_trunk("main");
@@ -445,7 +411,7 @@ mod tests {
     #[test]
     fn live_data_shows_status_and_title() {
         let current = make_bookmark("feat-a");
-        let graph = BookmarkGraph::for_testing(vec!["feat-a".into()], BTreeMap::new());
+        let graph = BookmarkGraph::for_testing(vec!["feat-a"], vec![]);
         let crs = make_change_requests(vec![("feat-a", 42, "main")]);
         let live = make_live_data(vec![(
             "feat-a",
@@ -467,7 +433,7 @@ mod tests {
     #[test]
     fn live_data_draft_and_merged() {
         let current = make_bookmark("feat-b");
-        let graph = BookmarkGraph::for_testing(vec!["feat-a".into()], BTreeMap::new());
+        let graph = BookmarkGraph::for_testing(vec![], vec![("feat-b", "feat-a")]);
         let crs = make_change_requests(vec![("feat-a", 10, "main"), ("feat-b", 11, "feat-a")]);
         let live = make_live_data(vec![
             (
@@ -494,7 +460,7 @@ mod tests {
     #[test]
     fn live_data_closed() {
         let current = make_bookmark("feat");
-        let graph = BookmarkGraph::for_testing(vec!["feat".into()], BTreeMap::new());
+        let graph = BookmarkGraph::for_testing(vec!["feat"], vec![]);
         let crs = make_change_requests(vec![("feat", 5, "main")]);
         let live = make_live_data(vec![(
             "feat",
@@ -514,7 +480,7 @@ mod tests {
     #[test]
     fn without_trunk_omits_diamond() {
         let bookmark = make_bookmark("feat-a");
-        let graph = BookmarkGraph::for_testing(vec!["feat-a".into()], BTreeMap::new());
+        let graph = BookmarkGraph::for_testing(vec!["feat-a"], vec![]);
         let crs = make_change_requests(vec![("feat-a", 1, "main")]);
 
         let comment = Comment::new(&bookmark, &graph, &crs);
@@ -527,7 +493,7 @@ mod tests {
     #[test]
     fn connector_lines_between_nodes() {
         let bookmark = make_bookmark("root");
-        let graph = BookmarkGraph::for_testing(vec!["root".into()], BTreeMap::new());
+        let graph = BookmarkGraph::for_testing(vec![], vec![("child", "root")]);
         let crs = make_change_requests(vec![("root", 1, "main"), ("child", 2, "root")]);
 
         let comment = Comment::new(&bookmark, &graph, &crs).with_trunk("main");
@@ -539,7 +505,8 @@ mod tests {
     #[test]
     fn forking_stack_both_children_above_root() {
         let current = make_bookmark("root");
-        let graph = BookmarkGraph::for_testing(vec!["root".into()], BTreeMap::new());
+        let graph =
+            BookmarkGraph::for_testing(vec![], vec![("child-a", "root"), ("child-b", "root")]);
         let crs = make_change_requests(vec![
             ("root", 1, "main"),
             ("child-a", 2, "root"),
@@ -561,12 +528,67 @@ mod tests {
         assert!(child_b_pos < root_pos, "child-b should be above root");
     }
 
+    #[test]
+    fn diamond_graph_includes_all_branches() {
+        // Diamond: library -> {deployment, service, cnp} -> integration-test
+        // All branches must appear in the comment regardless of the
+        // ForgeMeta target_branch (which can only point to one parent).
+        let current = make_bookmark("integration-test");
+        let graph = BookmarkGraph::for_testing(
+            vec![],
+            vec![
+                ("integration-test", "deployment"),
+                ("integration-test", "service"),
+                ("integration-test", "cnp"),
+                ("deployment", "library"),
+                ("service", "library"),
+                ("cnp", "library"),
+            ],
+        );
+        let crs = make_change_requests(vec![
+            ("library", 10, "main"),
+            ("deployment", 11, "library"),
+            ("service", 12, "library"),
+            ("cnp", 13, "library"),
+            // target_branch is only "deployment" — but the graph knows all 3 parents.
+            ("integration-test", 14, "deployment"),
+        ]);
+
+        let comment = Comment::new(&current, &graph, &crs).with_trunk("main");
+        let output = comment.to_string().unwrap();
+
+        // All five bookmarks must appear.
+        assert!(output.contains("library #10"));
+        assert!(output.contains("deployment #11"));
+        assert!(output.contains("service #12"));
+        assert!(output.contains("cnp #13"));
+        assert!(output.contains("integration-test #14"));
+
+        // integration-test (leaf) should be above all others.
+        let it_pos = output.find("integration-test").unwrap();
+        let lib_pos = output.find("library #10").unwrap();
+        assert!(it_pos < lib_pos, "integration-test should be above library");
+
+        // library (root) should be closest to trunk.
+        let trunk_pos = output.find("◆  main").unwrap();
+        assert!(lib_pos < trunk_pos, "library should be above trunk");
+
+        // All three middle branches should be between integration-test and library.
+        for name in &["deployment", "service", "cnp"] {
+            let pos = output.find(&format!("{name} #")).unwrap();
+            assert!(
+                it_pos < pos && pos < lib_pos,
+                "{name} should be between integration-test and library"
+            );
+        }
+    }
+
     // -- GitLab tests --
 
     #[test]
     fn single_gitlab_mr_graph() {
         let bookmark = make_bookmark("feat-a");
-        let graph = BookmarkGraph::for_testing(vec!["feat-a".into()], BTreeMap::new());
+        let graph = BookmarkGraph::for_testing(vec!["feat-a"], vec![]);
         let crs = make_gitlab_change_requests(vec![("feat-a", 1, "main")]);
 
         let comment = Comment::new(&bookmark, &graph, &crs).with_trunk("main");
@@ -585,7 +607,7 @@ mod tests {
     #[test]
     fn linear_gitlab_stack_ordering() {
         let current = make_bookmark("mid");
-        let graph = BookmarkGraph::for_testing(vec!["root".into()], BTreeMap::new());
+        let graph = BookmarkGraph::for_testing(vec![], vec![("leaf", "mid"), ("mid", "root")]);
         let crs = make_gitlab_change_requests(vec![
             ("root", 10, "main"),
             ("mid", 11, "root"),
@@ -611,7 +633,7 @@ mod tests {
     #[test]
     fn gitlab_live_data_produces_clickable_links() {
         let current = make_bookmark("feat-a");
-        let graph = BookmarkGraph::for_testing(vec!["feat-a".into()], BTreeMap::new());
+        let graph = BookmarkGraph::for_testing(vec!["feat-a"], vec![]);
         let crs = make_gitlab_change_requests(vec![("feat-a", 42, "main")]);
         let live = make_live_data(vec![(
             "feat-a",
@@ -636,7 +658,7 @@ mod tests {
     #[test]
     fn html_escapes_special_chars() {
         let bookmark = make_bookmark("feat<xss>");
-        let graph = BookmarkGraph::for_testing(vec!["feat<xss>".into()], BTreeMap::new());
+        let graph = BookmarkGraph::for_testing(vec!["feat<xss>"], vec![]);
 
         let mut crs = ChangeRequests::default();
         crs.set(
@@ -666,7 +688,7 @@ mod tests {
     #[test]
     fn missing_change_request_for_root_returns_error() {
         let bookmark = make_bookmark("feat-a");
-        let graph = BookmarkGraph::for_testing(vec!["feat-a".into()], BTreeMap::new());
+        let graph = BookmarkGraph::for_testing(vec!["feat-a"], vec![]);
         let crs = ChangeRequests::default();
 
         let comment = Comment::new(&bookmark, &graph, &crs);
@@ -676,17 +698,20 @@ mod tests {
     }
 
     #[test]
-    fn missing_forge_variant_returns_no_base_branch() {
+    fn missing_forge_variant_renders_without_cr_label() {
         let bookmark = make_bookmark("feat-a");
-        let graph = BookmarkGraph::for_testing(vec!["feat-a".into()], BTreeMap::new());
+        let graph = BookmarkGraph::for_testing(vec!["feat-a"], vec![]);
 
         let mut crs = ChangeRequests::default();
         crs.set("feat-a".to_string(), ForgeMeta { forge: None });
 
         let comment = Comment::new(&bookmark, &graph, &crs);
-        let err = comment.to_string().unwrap_err();
+        let output = comment.to_string().unwrap();
 
-        assert!(matches!(err, CommentError::NoBaseBranchFound));
+        // Node renders with bookmark name but no CR label or link.
+        assert!(output.contains("feat-a"));
+        let pre_block = output.split("</pre>").next().unwrap();
+        assert!(!pre_block.contains("<a href="));
     }
 
     // -- Footer test --
@@ -694,7 +719,7 @@ mod tests {
     #[test]
     fn includes_jj_spice_footer() {
         let bookmark = make_bookmark("feat");
-        let graph = BookmarkGraph::for_testing(vec!["feat".into()], BTreeMap::new());
+        let graph = BookmarkGraph::for_testing(vec!["feat"], vec![]);
         let crs = make_change_requests(vec![("feat", 42, "main")]);
 
         let comment = Comment::new(&bookmark, &graph, &crs);
