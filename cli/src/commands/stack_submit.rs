@@ -60,18 +60,14 @@ enum ResolvedBaseBookmark {
 /// forge-specific format.
 pub async fn run(
     args: &SubmitArgs,
-    env: &SpiceEnv,
+    env: &mut SpiceEnv,
     forge: &dyn Forge,
     source_repo: Option<&str>,
     trunk: &CommitId,
     head: &CommitId,
     trunk_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let store = &env.store;
-    let cr_store = ChangeRequestStore::new(store);
-    let graph = BookmarkGraph::build_active_graph(env.repo.as_ref(), trunk, head)?;
     let text_editor = TextEditor::from_settings(&env.settings)?;
-    let mut state = cr_store.load()?;
 
     let auto_accept =
         if let Ok(auto_accept) = env.config().get::<bool>(["spice", "auto-accept-changes"]) {
@@ -93,13 +89,22 @@ pub async fn run(
     // transaction first.  The returned repo (or `env.repo` if nothing was
     // tracked) is then used to classify every bookmark's push action and to
     // validate commits.
-    let (repo_for_push, push_entries, cr_metas) =
-        collect_push_data(env, &graph, auto_accept, args.auto_track_bookmarks)?;
+    let (repo_for_push, push_entries, cr_metas) = {
+        let graph = BookmarkGraph::build_active_graph(env.repo.as_ref(), trunk, head)?;
+        collect_push_data(env, &graph, auto_accept, args.auto_track_bookmarks)?
+    };
 
     // ── Batch sign + push (single transaction) ──
     if !push_entries.is_empty() {
         batch_push(env, &repo_for_push, trunk, push_entries)?;
     }
+
+    // Load the CR store and rebuild the graph after batch_push so the mutable
+    // borrow of `env` used by `commit_and_update_working_copy` doesn't
+    // conflict with the store/graph references.
+    let cr_store = ChangeRequestStore::new(&env.store);
+    let mut state = cr_store.load()?;
+    let graph = BookmarkGraph::build_active_graph(env.repo.as_ref(), trunk, head)?;
 
     // ── Pass 2: Create / retarget change requests ──
     for meta in &cr_metas {
@@ -469,7 +474,7 @@ fn remap_push_targets(
 /// all signing, rebasing, and pushing happen within one transaction that is
 /// committed at the end so jj's repo state stays consistent with the remote.
 fn batch_push(
-    env: &SpiceEnv,
+    env: &mut SpiceEnv,
     repo: &Arc<ReadonlyRepo>,
     trunk: &CommitId,
     entries: Vec<BookmarkPushEntry>,
@@ -562,9 +567,10 @@ fn batch_push(
 
     print_push_stats(&env.ui, &push_stats)?;
 
-    // 6. Commit the transaction so jj's local state matches the remote.
+    // 6. Commit the transaction and update the working copy so jj's local
+    //    state (both operation log and on-disk tree) matches the remote.
     if push_stats.all_ok() {
-        tx.commit("push stack bookmarks".to_string())?;
+        env.commit_and_update_working_copy(tx, "push stack bookmarks")?;
         for entry in &entries {
             writeln!(
                 env.ui.stdout_formatter(),

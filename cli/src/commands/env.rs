@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::Arc;
 
 use jj_cli::cli_util::{GlobalArgs, RevisionArg, find_workspace_dir};
@@ -21,6 +22,7 @@ use jj_lib::revset::{
     RevsetParseContext, RevsetWorkspaceContext,
 };
 use jj_lib::settings::UserSettings;
+use jj_lib::transaction::Transaction;
 use jj_lib::workspace::{
     DefaultWorkspaceLoaderFactory, Workspace, WorkspaceLoaderFactory,
     default_working_copy_factories,
@@ -332,6 +334,78 @@ impl SpiceEnv {
         );
 
         Ok(evaluator.resolve()?)
+    }
+
+    /// Commit a transaction and update the on-disk working copy to match.
+    ///
+    /// After transactions that rewrite commits (rebase, sign, etc.) the
+    /// operation log records the new state but the working tree on disk still
+    /// reflects the pre-rewrite commit.  This helper bridges the gap:
+    ///
+    /// 1. Resolves the old and new working-copy commits from the transaction.
+    /// 2. For colocated repos, resets the git HEAD and exports refs.
+    /// 3. Commits the transaction to the operation log.
+    /// 4. Checks out the (potentially rewritten) working-copy commit on disk.
+    ///
+    /// Returns the committed `ReadonlyRepo` snapshot so callers can continue
+    /// operating against the up-to-date state.
+    pub(crate) fn commit_and_update_working_copy(
+        &mut self,
+        mut tx: Transaction,
+        description: impl Into<String>,
+    ) -> Result<Arc<ReadonlyRepo>, Box<dyn std::error::Error>> {
+        let ws_name = self.workspace.workspace_name().to_owned();
+
+        // Resolve old working-copy commit from the base repo (before the tx).
+        let old_wc_commit = tx
+            .base_repo()
+            .view()
+            .get_wc_commit_id(&ws_name)
+            .map(|id| tx.base_repo().store().get_commit(id))
+            .transpose()?;
+
+        // Resolve new working-copy commit from the mutated repo (after rewrites).
+        let new_wc_commit = tx
+            .repo()
+            .view()
+            .get_wc_commit_id(&ws_name)
+            .map(|id| tx.repo().store().get_commit(id))
+            .transpose()?;
+
+        // Colocated git repo: reset HEAD and export refs before committing.
+        if jj_cli::git_util::is_colocated_git_workspace(&self.workspace, tx.base_repo()) {
+            if let Some(wc_commit) = &new_wc_commit {
+                // Errors updating HEAD are non-fatal — the actual state will
+                // be imported on the next snapshot.
+                if let Err(e) = jj_lib::git::reset_head(tx.repo_mut(), wc_commit) {
+                    writeln!(self.ui.warning_default(), "{e}")?;
+                }
+            }
+            let stats = jj_lib::git::export_refs(tx.repo_mut())?;
+            jj_cli::git_util::print_git_export_stats(&self.ui, &stats)?;
+        }
+
+        // Commit the transaction to the operation log.
+        let repo = tx.commit(description)?;
+
+        // Check out the (possibly rewritten) working-copy tree on disk.
+        if let Some(new_commit) = &new_wc_commit {
+            let old_tree = old_wc_commit.as_ref().map(|c| c.tree());
+            let stats =
+                self.workspace
+                    .check_out(repo.op_id().clone(), old_tree.as_ref(), new_commit)?;
+            if stats.added_files > 0 || stats.updated_files > 0 || stats.removed_files > 0 {
+                writeln!(
+                    self.ui.status(),
+                    "Added {} files, modified {} files, removed {} files",
+                    stats.added_files,
+                    stats.updated_files,
+                    stats.removed_files,
+                )?;
+            }
+        }
+
+        Ok(repo)
     }
 }
 

@@ -93,7 +93,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
                         stack_submit::run(
                             &submit_args,
-                            &env,
+                            &mut env,
                             forge.as_ref(),
                             source_repo.as_deref(),
                             &trunk,
@@ -109,7 +109,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         .map_err(|e| format!("failed to resolve @: {e}"))?;
                     rt.block_on(stack_sync::run(
                         &sync_args,
-                        &env,
+                        &mut env,
                         &trunk,
                         &head,
                         &trunk_name,

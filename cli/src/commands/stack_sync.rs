@@ -51,7 +51,7 @@ enum BookmarkSyncError {
 /// The choice is persisted to the jj repo config so future runs skip the prompt.
 pub async fn run(
     args: &SyncArgs,
-    env: &SpiceEnv,
+    env: &mut SpiceEnv,
     trunk: &CommitId,
     head: &CommitId,
     trunk_name: &str,
@@ -80,16 +80,24 @@ pub async fn run(
 
     // Build the bookmark graph. If the `--restack` flag is specified, rebase the
     // stack onto trunk first, then build the graph from the updated repo state.
-    let active_repo = if args.restack {
+    let (active_repo, head) = if args.restack {
         // Build a temporary graph to discover root bookmarks, then rebase.
         let initial_graph =
             BookmarkGraph::build_active_graph(repo_after_fetch.as_ref(), &trunk, head)?;
         let root_bookmarks = initial_graph.root_bookmarks.clone();
-        restack_graph(env, &repo_after_fetch, &root_bookmarks, &trunk)?
+        let repo = restack_graph(env, &repo_after_fetch, &root_bookmarks, &trunk)?;
+        // Re-resolve @ from the rebased repo — the old commit ID is stale.
+        let ws_name = env.workspace.workspace_name();
+        let new_head = repo
+            .view()
+            .get_wc_commit_id(ws_name)
+            .cloned()
+            .unwrap_or_else(|| head.clone());
+        (repo, new_head)
     } else {
-        repo_after_fetch
+        (repo_after_fetch, head.clone())
     };
-    let graph = BookmarkGraph::build_active_graph(active_repo.as_ref(), &trunk, head)?;
+    let graph = BookmarkGraph::build_active_graph(active_repo.as_ref(), &trunk, &head)?;
 
     let spice_store = SpiceStore::init_at(env.workspace.repo_path())?;
     let cr_store = ChangeRequestStore::new(&spice_store);
@@ -343,7 +351,7 @@ fn fetch_trunk(
 /// `env.repo`) so that the rebase sees the freshly-fetched trunk position.
 /// Returns the committed repo for downstream graph construction.
 fn restack_graph(
-    env: &SpiceEnv,
+    env: &mut SpiceEnv,
     repo: &Arc<ReadonlyRepo>,
     root_bookmarks: &[String],
     trunk: &CommitId,
@@ -382,7 +390,7 @@ fn restack_graph(
     tx.repo_mut().rebase_descendants()?;
 
     print_move_commits_stats(&env.ui, &stats)?;
-    Ok(tx.commit("restack bookmarks on trunk")?)
+    env.commit_and_update_working_copy(tx, "restack bookmarks on trunk")
 }
 
 /// Print details about the provided [`MoveCommitsStats`].
