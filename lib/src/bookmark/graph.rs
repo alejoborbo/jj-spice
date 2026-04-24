@@ -299,10 +299,8 @@ impl<'a> BookmarkGraph<'a> {
     ) -> HashMap<CommitId, Vec<Arc<Bookmark<'a>>>> {
         repo.view()
             .bookmarks()
+            .filter(|(_, ref_target)| ref_target.local_target.as_normal().is_some())
             .filter_map(|(ref_name, ref_target)| {
-                // Resolve via local target first, falling back to remote refs.
-                // This handles bookmarks that only exist as remote-tracking
-                // refs (e.g. main@origin with no local main).
                 let commit_id = resolve_commit_id(&ref_target)?;
                 Some((
                     commit_id.to_owned(),
