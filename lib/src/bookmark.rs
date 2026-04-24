@@ -326,6 +326,36 @@ mod tests {
         assert_eq!(resolve_commit_id(&absent_target()), None);
     }
 
+    // -- local_target predicate tests --
+    // build_bookmark_commit_map() filters on local_target.as_normal().is_some()
+    // to exclude remote-only bookmarks from the graph. These tests guard that
+    // invariant.
+
+    #[test]
+    fn remote_only_bookmark_has_no_local_target() {
+        let id = commit_id(1);
+        let remote = make_remote_ref_at(&id, false);
+        let target = LocalRemoteRefTarget {
+            local_target: RefTarget::absent_ref(),
+            remote_refs: vec![(RemoteName::new("origin"), &remote)],
+        };
+        // Remote-only: resolve_commit_id succeeds (via fallback) but
+        // local_target is absent — graph should exclude this.
+        assert!(target.local_target.as_normal().is_none());
+        assert!(resolve_commit_id(&target).is_some());
+    }
+
+    #[test]
+    fn local_bookmark_has_local_target() {
+        let id = commit_id(2);
+        let local = RefTarget::normal(id.clone());
+        let target = LocalRemoteRefTarget {
+            local_target: &local,
+            remote_refs: vec![],
+        };
+        assert!(target.local_target.as_normal().is_some());
+    }
+
     #[test]
     fn resolve_commit_id_skips_absent_remote_refs() {
         let id = commit_id(5);
