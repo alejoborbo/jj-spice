@@ -104,24 +104,18 @@ pub fn detect_forges(
     let mut unmatched = Vec::new();
 
     for name in git_repo.remote_names() {
-        let name_str = match std::str::from_utf8(name.as_ref()) {
-            Ok(s) => s,
-            Err(_) => continue,
+        let Ok(name_str) = std::str::from_utf8(name.as_ref()) else {
+            continue;
+        };
+        let Some(Ok(remote)) = git_repo.try_find_remote(name_str) else {
+            continue;
         };
 
-        let remote = match git_repo.try_find_remote(name.as_ref()) {
-            Some(Ok(r)) => r,
-            _ => continue,
+        let Some(url) = remote.url(Direction::Fetch) else {
+            continue;
         };
-
-        let url = match remote.url(Direction::Fetch) {
-            Some(u) => u,
-            None => continue,
-        };
-
-        let host = match url.host() {
-            Some(h) => h,
-            None => continue,
+        let Some(host) = url.host() else {
+            continue;
         };
 
         match detect_forge_from_host(host, url.path.as_ref(), config) {
@@ -132,11 +126,10 @@ pub fn detect_forges(
             None => {
                 // Host unrecognised — record for potential interactive prompt
                 // if the URL path yields a valid owner/repo.
-                let path_str = match std::str::from_utf8(url.path.as_ref()) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                if let Some((owner, repo)) = parse_owner_repo(path_str) {
+                if let Some((owner, repo)) = std::str::from_utf8(url.path.as_ref())
+                    .ok()
+                    .and_then(parse_owner_repo)
+                {
                     unmatched.push(UnmatchedRemote {
                         remote_name: name_str.to_string(),
                         hostname: host.to_string(),

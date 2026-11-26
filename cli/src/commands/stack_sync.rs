@@ -2,17 +2,20 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
 
-use jj_cli::git_util::GitSubprocessUi;
+use futures::TryStreamExt as _;
+use jj_cli::git_util::{GitSubprocessUi, load_git_import_options};
+use jj_cli::revset_util::parse_remote_fetch_bookmarks;
 use jj_cli::ui::Ui;
 use jj_lib::backend::CommitId;
 use jj_lib::config::{ConfigFile, ConfigSource};
-use jj_lib::git::{GitFetch, GitFetchRefExpression, GitImportOptions, expand_fetch_refspecs};
+use jj_lib::git::{GitFetch, GitFetchRefExpression, REMOTE_NAME_FOR_LOCAL_GIT_REPO};
 use jj_lib::ref_name::{RefName, RemoteName};
 use jj_lib::repo::{ReadonlyRepo, Repo};
 use jj_lib::revset::ResolvedRevsetExpression;
 use jj_lib::rewrite::{
     MoveCommitsLocation, MoveCommitsStats, MoveCommitsTarget, RebaseOptions, move_commits,
 };
+use jj_lib::settings::RemoteSettingsMap;
 use jj_lib::str_util::{StringExpression, StringPattern};
 use jj_spice_lib::bookmark::Bookmark;
 use jj_spice_lib::bookmark::graph::{BookmarkGraph, BookmarkNode};
@@ -67,7 +70,12 @@ pub async fn run(
     // Fetch the latest remote changes for the trunk branch.
     // The returned repo reflects the fetched state so subsequent operations
     // see the up-to-date trunk.
-    let repo_after_fetch = fetch_trunk(env, trunk_name)?;
+    let repo_after_fetch = fetch_trunk(env, trunk_name).await?;
+    let head = repo_after_fetch
+        .view()
+        .get_wc_commit_id(env.workspace.workspace_name())
+        .unwrap_or(head)
+        .clone();
 
     // Re-resolve trunk from the updated view — the bookmark may have advanced
     // after the fetch (e.g. new merge commits on main).
@@ -83,13 +91,13 @@ pub async fn run(
     let active_repo = if args.restack {
         // Build a temporary graph to discover root bookmarks, then rebase.
         let initial_graph =
-            BookmarkGraph::build_active_graph(repo_after_fetch.as_ref(), &trunk, head)?;
+            BookmarkGraph::build_active_graph(repo_after_fetch.as_ref(), &trunk, &head)?;
         let root_bookmarks = initial_graph.root_bookmarks.clone();
-        restack_graph(env, &repo_after_fetch, &root_bookmarks, &trunk)?
+        restack_graph(env, &repo_after_fetch, &root_bookmarks, &trunk).await?
     } else {
         repo_after_fetch
     };
-    let graph = BookmarkGraph::build_active_graph(active_repo.as_ref(), &trunk, head)?;
+    let graph = BookmarkGraph::build_active_graph(active_repo.as_ref(), &trunk, &head)?;
 
     let spice_store = SpiceStore::init_at(env.workspace.repo_path())?;
     let cr_store = ChangeRequestStore::new(&spice_store);
@@ -130,13 +138,7 @@ pub async fn run(
         .unwrap_or(true);
 
     if auto_clean {
-        let local_bookmarks: HashSet<String> = env
-            .repo
-            .view()
-            .bookmarks()
-            .map(|(name, _)| name.as_str().to_string())
-            .collect();
-        auto_clean_entries(&env.ui, &mut state, &forges, &local_bookmarks).await?;
+        auto_clean_entries(&env.ui, &mut state, &forges, &active_repo).await?;
     }
 
     cr_store.save(&state)?;
@@ -152,14 +154,19 @@ async fn auto_clean_entries(
     ui: &Ui,
     state: &mut jj_spice_lib::protos::change_request::ChangeRequests,
     forges: &HashMap<String, Box<dyn Forge>>,
-    local_bookmarks: &HashSet<String>,
+    repo: &ReadonlyRepo,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let Some(forge) = forges.values().next() else {
         return Ok(());
     };
 
+    let local_bookmarks = repo
+        .view()
+        .bookmarks()
+        .map(|(name, _)| name.as_str().to_owned())
+        .collect();
     let inactive =
-        jj_spice_lib::clean::find_inactive_entries(state, forge.as_ref(), local_bookmarks).await;
+        jj_spice_lib::clean::find_inactive_entries(state, forge.as_ref(), &local_bookmarks).await;
 
     if inactive.is_empty() {
         return Ok(());
@@ -273,49 +280,23 @@ fn resolve_unmatched_remotes(
 ///
 /// Returns the committed repo snapshot so callers see the updated trunk
 /// position instead of the stale `env.repo`.
-fn fetch_trunk(
+async fn fetch_trunk(
     env: &SpiceEnv,
     trunk_name: &str,
 ) -> Result<Arc<ReadonlyRepo>, Box<dyn std::error::Error>> {
-    // Get all trunk remotes.
-    let trunk_remotes: Vec<&RemoteName> = env
-        .repo
-        .view()
-        .bookmarks()
-        .filter(|(ref_name, _)| ref_name.as_str() == trunk_name)
-        .flat_map(|(_, ref_target)| {
-            ref_target
-                .remote_refs
-                .iter()
-                .filter_map(|(remote_name, remote_ref)| {
-                    // Exclude the "git" remote, which is used for internal tracking.
-                    if !remote_ref.is_tracked() || *remote_name == "git" {
-                        return None;
-                    }
-                    Some(*remote_name)
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
-    // Build the fetch refspecs that are used to fetch the latest changes
-    let mut fetch_refs = HashMap::new();
-    for remote_name in &trunk_remotes {
-        let expr = GitFetchRefExpression {
-            bookmark: StringExpression::Pattern(Box::new(StringPattern::Exact(
-                trunk_name.to_string(),
-            ))),
-            tag: StringExpression::none(),
-        };
-        fetch_refs.insert(*remote_name, expand_fetch_refspecs(remote_name, expr)?);
+    let remote_settings = env.settings.remote_settings()?;
+    let fetch_remotes = trunk_fetch_remotes(env, trunk_name, &remote_settings)?;
+    if fetch_remotes.is_empty() {
+        return Ok(env.repo.clone());
     }
 
-    let mut tx = env.repo.start_transaction();
-    let import_options = GitImportOptions {
-        auto_local_bookmark: env.git_settings.auto_local_bookmark,
-        abandon_unreachable_commits: env.git_settings.abandon_unreachable_commits,
-        remote_auto_track_bookmarks: HashMap::new(),
+    let expression = GitFetchRefExpression {
+        bookmark: StringExpression::Pattern(Box::new(StringPattern::Exact(trunk_name.to_owned()))),
+        tag: StringExpression::none(),
     };
+    let mut tx = env.repo.start_transaction();
+    let import_options =
+        load_git_import_options(&env.ui, &env.git_settings, &remote_settings).map_err(cmd_err)?;
     let mut git_fetch = GitFetch::new(
         tx.repo_mut(),
         env.git_settings.to_subprocess_options(),
@@ -323,18 +304,40 @@ fn fetch_trunk(
     )?;
 
     // Fetch changes from each remote
-    for (remote_name, expanded_fetch_refspecs) in fetch_refs {
+    for remote in fetch_remotes {
         let mut callback = GitSubprocessUi::new(&env.ui);
-        git_fetch.fetch(
-            remote_name,
-            expanded_fetch_refspecs,
-            &mut callback,
-            None,
-            None,
-        )?;
+        git_fetch.fetch(remote, &expression, &mut callback, None)?;
     }
+    git_fetch.import_refs().await?;
+    tx.repo_mut().rebase_descendants().await?;
 
-    Ok(tx.commit("fetch trunk")?)
+    if tx.repo().has_changes() {
+        Ok(tx.commit("fetch trunk").await?)
+    } else {
+        Ok(env.repo.clone())
+    }
+}
+
+fn trunk_fetch_remotes<'a>(
+    env: &'a SpiceEnv,
+    trunk_name: &str,
+    settings: &RemoteSettingsMap,
+) -> Result<Vec<&'a RemoteName>, Box<dyn std::error::Error>> {
+    let mut remotes = Vec::new();
+    for (symbol, target) in env.repo.view().all_remote_bookmarks() {
+        if symbol.name.as_str() != trunk_name
+            || symbol.remote == REMOTE_NAME_FOR_LOCAL_GIT_REPO
+            || !target.is_tracked()
+        {
+            continue;
+        }
+        let configured =
+            parse_remote_fetch_bookmarks(&env.ui, settings, symbol.remote).map_err(cmd_err)?;
+        if configured.is_none_or(|expr| expr.to_matcher().is_match(trunk_name)) {
+            remotes.push(symbol.remote);
+        }
+    }
+    Ok(remotes)
 }
 
 /// Restack the bookmark graph on top of the trunk branch.
@@ -342,7 +345,7 @@ fn fetch_trunk(
 /// Uses the provided `repo` snapshot (instead of the potentially stale
 /// `env.repo`) so that the rebase sees the freshly-fetched trunk position.
 /// Returns the committed repo for downstream graph construction.
-fn restack_graph(
+async fn restack_graph(
     env: &SpiceEnv,
     repo: &Arc<ReadonlyRepo>,
     root_bookmarks: &[String],
@@ -368,8 +371,9 @@ fn restack_graph(
             .roots();
     let root_commit_ids: Vec<CommitId> = roots_expression
         .evaluate(repo.as_ref())?
-        .iter()
-        .collect::<Result<Vec<_>, _>>()?;
+        .stream()
+        .try_collect()
+        .await?;
 
     // Perform the rebase.
     let loc = MoveCommitsLocation {
@@ -378,11 +382,11 @@ fn restack_graph(
         target: MoveCommitsTarget::Roots(root_commit_ids),
     };
     let mut tx = repo.start_transaction();
-    let stats = move_commits(tx.repo_mut(), &loc, &RebaseOptions::default())?;
-    tx.repo_mut().rebase_descendants()?;
+    let stats = move_commits(tx.repo_mut(), &loc, &RebaseOptions::default()).await?;
+    tx.repo_mut().rebase_descendants().await?;
 
     print_move_commits_stats(&env.ui, &stats)?;
-    Ok(tx.commit("restack bookmarks on trunk")?)
+    Ok(tx.commit("restack bookmarks on trunk").await?)
 }
 
 /// Print details about the provided [`MoveCommitsStats`].
@@ -564,8 +568,126 @@ async fn sync_bookmark(
 
 #[cfg(test)]
 mod tests {
+    use jj_lib::git;
+    use jj_lib::op_store::RefTarget;
     use jj_spice_lib::protos::change_request::forge_meta::Forge as ForgeOneof;
     use jj_spice_lib::protos::change_request::{ForgeMeta, GitHubMeta};
+
+    use super::*;
+    use crate::commands::env::test_repo;
+
+    #[tokio::test]
+    async fn fetch_trunk_honors_patterns_and_rebases_descendants_of_rewritten_trunk() {
+        let origin_path = tempfile::tempdir().unwrap();
+        let local_path = tempfile::tempdir().unwrap();
+        let origin = test_repo::init(origin_path.path(), true).await;
+        let local = test_repo::init(local_path.path(), false).await;
+        let trunk = RefName::new("main");
+        let origin_name = RemoteName::new("origin");
+        let root = origin.repo.store().root_commit_id();
+
+        let mut tx = origin.repo.start_transaction();
+        let first = test_repo::commit(tx.repo_mut(), root, "Initial trunk").await;
+        tx.repo_mut()
+            .set_local_bookmark_target(trunk, RefTarget::normal(first.id().clone()));
+        git::export_refs(tx.repo_mut()).unwrap();
+        let origin_repo = tx.commit("Set trunk").await.unwrap();
+
+        let mut tx = local.repo.start_transaction();
+        test_repo::add_origin(tx.repo_mut(), &origin);
+        tx.commit("Add origin").await.unwrap();
+        let local = test_repo::open(local_path.path(), &[]);
+        let mut tx = local.repo.start_transaction();
+        let import_options = load_git_import_options(
+            &local.ui,
+            &local.git_settings,
+            &local.settings.remote_settings().unwrap(),
+        )
+        .unwrap();
+        let mut fetch = GitFetch::new(
+            tx.repo_mut(),
+            local.git_settings.to_subprocess_options(),
+            &import_options,
+        )
+        .unwrap();
+        fetch
+            .fetch(
+                origin_name,
+                &GitFetchRefExpression {
+                    bookmark: StringExpression::Pattern(Box::new(StringPattern::Exact(
+                        trunk.as_str().to_owned(),
+                    ))),
+                    tag: StringExpression::none(),
+                },
+                &mut GitSubprocessUi::new(&local.ui),
+                None,
+            )
+            .unwrap();
+        fetch.import_refs().await.unwrap();
+        tx.repo_mut()
+            .track_remote_bookmark(trunk.to_remote_symbol(origin_name))
+            .await
+            .unwrap();
+        let repo = tx.commit("Track trunk").await.unwrap();
+        assert_eq!(
+            repo.view().get_local_bookmark(trunk).as_normal(),
+            Some(first.id())
+        );
+
+        let mut tx = repo.start_transaction();
+        let child = test_repo::commit(tx.repo_mut(), first.id(), "Local stack").await;
+        let topic = RefName::new("topic");
+        tx.repo_mut()
+            .set_local_bookmark_target(topic, RefTarget::normal(child.id().clone()));
+        tx.commit("Build local stack").await.unwrap();
+
+        let mut tx = origin_repo.start_transaction();
+        let rewritten = tx
+            .repo_mut()
+            .rewrite_commit(&first)
+            .set_description("Rewritten trunk")
+            .write()
+            .await
+            .unwrap();
+        tx.repo_mut()
+            .set_local_bookmark_target(trunk, RefTarget::normal(rewritten.id().clone()));
+        let side = RefName::new("side");
+        tx.repo_mut()
+            .set_local_bookmark_target(side, RefTarget::normal(rewritten.id().clone()));
+        tx.repo_mut().rebase_descendants().await.unwrap();
+        git::export_refs(tx.repo_mut()).unwrap();
+        tx.commit("Rewrite trunk").await.unwrap();
+
+        let excluded = test_repo::open(
+            local_path.path(),
+            &["remotes.origin.fetch-bookmarks='~main'"],
+        );
+        let repo = fetch_trunk(&excluded, trunk.as_str()).await.unwrap();
+        assert_eq!(
+            repo.view().get_local_bookmark(trunk).as_normal(),
+            Some(first.id())
+        );
+
+        let included = test_repo::open(
+            local_path.path(),
+            &["remotes.origin.fetch-bookmarks='main | side'"],
+        );
+        let repo = fetch_trunk(&included, trunk.as_str()).await.unwrap();
+        assert_eq!(
+            repo.view().get_local_bookmark(trunk).as_normal(),
+            Some(rewritten.id())
+        );
+        assert!(
+            repo.view()
+                .get_remote_bookmark(side.to_remote_symbol(origin_name))
+                .target
+                .is_absent()
+        );
+        let tip = repo.view().get_local_bookmark(topic).as_normal().unwrap();
+        let rebased = repo.store().get_commit(tip).unwrap();
+        assert_eq!(rebased.change_id(), child.change_id());
+        assert_eq!(rebased.parent_ids(), [rewritten.id().clone()]);
+    }
 
     #[test]
     fn forge_meta_display_github_variant() {
@@ -581,6 +703,80 @@ mod tests {
             })),
         };
         assert_eq!(meta.to_string(), "GitHub PR #42 (feat → main)");
+    }
+
+    async fn restack_working_copy(colocated: bool) -> bool {
+        let path = tempfile::tempdir().unwrap();
+        let mut env = test_repo::init(path.path(), colocated).await;
+        let root = env.repo.store().root_commit_id().clone();
+        let mut tx = env.repo.start_transaction();
+        use jj_lib::backend::{CopyId, TreeValue};
+        use jj_lib::merged_tree_builder::MergedTreeBuilder;
+        use jj_lib::repo_path::RepoPath;
+
+        let store = tx.repo().store();
+        let mut tree = MergedTreeBuilder::new(store.empty_merged_tree());
+        let file = RepoPath::from_internal_string("trunk-file").unwrap();
+        let id = store
+            .write_file(file, &mut &b"new trunk content"[..])
+            .await
+            .unwrap();
+        tree.set_or_remove(
+            file.to_owned(),
+            Some(TreeValue::File {
+                id,
+                executable: false,
+                copy_id: CopyId::placeholder(),
+            }),
+        );
+        let tree = tree.write_tree().await.unwrap();
+        let trunk = tx
+            .repo_mut()
+            .new_commit(vec![root.clone()], tree)
+            .set_description("New trunk")
+            .write()
+            .await
+            .unwrap();
+        let topic = test_repo::commit(tx.repo_mut(), &root, "Topic").await;
+        tx.repo_mut().set_local_bookmark_target(
+            RefName::new("topic"),
+            RefTarget::normal(topic.id().clone()),
+        );
+        tx.repo_mut()
+            .set_wc_commit(
+                env.workspace.workspace_name().to_owned(),
+                topic.id().clone(),
+            )
+            .unwrap();
+        let repo = tx.commit("Build stack").await.unwrap();
+        env.workspace
+            .check_out(repo.op_id().clone(), None, &topic)
+            .await
+            .unwrap();
+
+        let repo = restack_graph(&env, &repo, &["topic".to_owned()], trunk.id())
+            .await
+            .unwrap();
+        let wc_id = repo
+            .view()
+            .get_wc_commit_id(env.workspace.workspace_name())
+            .unwrap();
+        let rebased = repo.store().get_commit(wc_id).unwrap();
+        assert_eq!(rebased.change_id(), topic.change_id());
+        assert_eq!(rebased.parent_ids(), [trunk.id().clone()]);
+        test_repo::is_fresh(&env, &repo, &rebased).await
+    }
+
+    #[tokio::test]
+    #[ignore = "Blocked by PR #87: restack does not update the on-disk working copy"]
+    async fn restack_working_copy_freshness() {
+        let colocated = restack_working_copy(true).await;
+        let internal_git = restack_working_copy(false).await;
+        assert_eq!(
+            (colocated, internal_git),
+            (true, true),
+            "fresh working copy (colocated, non-colocated)"
+        );
     }
 
     #[test]

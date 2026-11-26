@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 const_format = "0.2.35"
+futures.workspace = true
 gix = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 
+use futures::executor::block_on;
 use jj_cli::cli_util::RevisionArg;
 use jj_cli::formatter::Formatter;
 use jj_cli::graphlog::{GraphStyle, get_graphlog};
@@ -249,7 +250,7 @@ fn find_wc_bookmark(
             continue;
         };
         // @ must be a strict ancestor of this bookmark's commit.
-        let Ok(is_anc) = index.is_ancestor(wc_id, node_commit) else {
+        let Ok(is_anc) = block_on(index.is_ancestor(wc_id, node_commit)) else {
             continue;
         };
         if !is_anc || wc_id == node_commit {
@@ -264,11 +265,11 @@ fn find_wc_bookmark(
                 .iter()
                 .find(|n| n.name() == edge.target)
                 .and_then(|parent| parent.commits().first())
-                .and_then(|parent_commit| index.is_ancestor(parent_commit, wc_id).ok())
+                .and_then(|parent_commit| block_on(index.is_ancestor(parent_commit, wc_id)).ok())
                 .is_some_and(|is_anc| is_anc && edge.target != node.name())
         });
 
-        if all_parents_below || parent_edges.is_empty() {
+        if all_parents_below {
             result.insert(node.name().to_string(), WcPosition::Nearby);
             return result;
         }
@@ -694,6 +695,8 @@ fn format_meta_id(meta: &ForgeMeta) -> String {
 mod tests {
     use super::*;
     use jj_lib::op_store::{LocalRemoteRefTarget, RefTarget};
+
+    static ABSENT_TARGET: RefTarget = RefTarget::absent();
     use jj_spice_lib::forge::github::GitHubChangeRequest;
     use jj_spice_lib::protos::change_request::{ChangeRequests, GitHubMeta};
 
@@ -704,7 +707,7 @@ mod tests {
         BookmarkNode::new(jj_spice_lib::bookmark::Bookmark::new(
             name.into(),
             LocalRemoteRefTarget {
-                local_target: RefTarget::absent_ref(),
+                local_target: &ABSENT_TARGET,
                 remote_refs: vec![],
             },
         ))

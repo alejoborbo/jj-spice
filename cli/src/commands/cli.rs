@@ -4,7 +4,7 @@ use clap::builder::StyledStr;
 use clap::builder::Styles;
 use clap::builder::styling::{AnsiColor, Style as AnsiStyle};
 use clap::{Args, Command, Parser, Subcommand};
-use jj_cli::cli_util::GlobalArgs;
+use jj_cli::cli_args::GlobalArgs;
 
 /// Colour theme matching jj-cli's help output.
 ///

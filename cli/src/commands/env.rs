@@ -1,30 +1,36 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use jj_cli::cli_util::{GlobalArgs, RevisionArg, find_workspace_dir};
+use futures::executor::{block_on, block_on_stream};
+use jj_cli::cli_args::GlobalArgs;
+use jj_cli::cli_util::{
+    RevisionArg, find_workspace_dir, load_fileset_aliases, load_revset_aliases,
+};
 use jj_cli::command_error::print_parse_diagnostics;
 use jj_cli::config::{
-    ConfigArgKind, ConfigEnv, config_from_environment, default_config_layers, parse_config_args,
+    ConfigArgKind, ConfigEnv, config_from_environment, default_config_layers,
+    default_config_migrations, parse_config_args,
 };
-use jj_cli::revset_util::{RevsetExpressionEvaluator, load_revset_aliases};
+use jj_cli::revset_util::RevsetExpressionEvaluator;
 use jj_cli::ui::Ui;
 use jj_lib::backend::CommitId;
 use jj_lib::config::{ConfigLayer, ConfigSource};
+use jj_lib::default_backend_factories::{
+    default_backend_factories, default_working_copy_factories,
+};
+use jj_lib::fileset::FilesetAliasesMap;
 use jj_lib::git::GitSettings;
 use jj_lib::id_prefix::IdPrefixContext;
 use jj_lib::op_walk;
 use jj_lib::ref_name::RemoteNameBuf;
-use jj_lib::repo::{ReadonlyRepo, Repo as _, StoreFactories};
-use jj_lib::repo_path::RepoPathUiConverter;
+use jj_lib::repo::{ReadonlyRepo, Repo as _};
 use jj_lib::revset::{
     ResolvedRevsetExpression, RevsetAliasesMap, RevsetDiagnostics, RevsetExtensions,
     RevsetParseContext, RevsetWorkspaceContext,
 };
 use jj_lib::settings::UserSettings;
-use jj_lib::workspace::{
-    DefaultWorkspaceLoaderFactory, Workspace, WorkspaceLoaderFactory,
-    default_working_copy_factories,
-};
+use jj_lib::ui_path::RepoPathUiConverter;
+use jj_lib::workspace::{DefaultWorkspaceLoaderFactory, Workspace, WorkspaceLoaderFactory};
 
 use jj_spice_lib::forge::Forge;
 
@@ -82,8 +88,7 @@ pub(crate) struct SpiceEnv {
     /// Terminal output fidelity (modern vs classic).
     pub(crate) output_mode: OutputMode,
     path_converter: RepoPathUiConverter,
-    user_email: String,
-    revset_aliases: RevsetAliasesMap,
+    aliases: (RevsetAliasesMap, FilesetAliasesMap),
     revset_extensions: Arc<RevsetExtensions>,
 }
 
@@ -99,28 +104,37 @@ impl SpiceEnv {
         let (config, ui, workspace_root, config_env) = load_config(&cwd, global_args)?;
 
         // 2. Load workspace + repo via jj-lib.
-        let settings = UserSettings::from_config(config.clone())?;
-        let workspace = Workspace::load(
-            &settings,
-            &workspace_root,
-            &StoreFactories::default(),
-            &default_working_copy_factories(),
+        let settings = UserSettings::from_config_and_home_dir(
+            config.clone(),
+            config_env.home_dir().map(ToOwned::to_owned),
         )?;
+        let workspace = DefaultWorkspaceLoaderFactory
+            .create(&workspace_root)?
+            .load(
+                &settings,
+                &default_backend_factories(),
+                &default_working_copy_factories(),
+            )?;
         let git_settings = GitSettings::from_settings(&settings)?;
 
         // 3. Load the repo, optionally at a specific operation (--at-operation).
         let repo = if let Some(op_str) = &global_args.at_operation {
             let loader = workspace.repo_loader();
-            let op = op_walk::resolve_op_for_load(loader, op_str)?;
-            loader.load_at(&op)?
+            let op = block_on(op_walk::resolve_op_for_load(loader, op_str))?;
+            block_on(loader.load_at(&op))?
         } else {
-            workspace.repo_loader().load_at_head()?
+            block_on(
+                workspace
+                    .repo_loader()
+                    .load_at_head(Some(workspace.workspace_name())),
+            )?
         };
 
         // 4. Revset setup: load aliases once, like jj-cli does.
-        let user_email: String = config.get(["user", "email"]).unwrap_or_default();
-        let revset_aliases = load_revset_aliases(&ui, &config).map_err(cmd_err)?;
-        let revset_extensions = Arc::new(RevsetExtensions::new());
+        let aliases = (
+            load_revset_aliases(&ui, &config).map_err(cmd_err)?,
+            load_fileset_aliases(&ui, &config).map_err(cmd_err)?,
+        );
 
         // 5. Build path converter once so revset_parse_context() can borrow it.
         let path_converter = RepoPathUiConverter::Fs {
@@ -144,9 +158,8 @@ impl SpiceEnv {
             store,
             output_mode,
             path_converter,
-            user_email,
-            revset_aliases,
-            revset_extensions,
+            aliases,
+            revset_extensions: Arc::new(RevsetExtensions::new()),
         })
     }
 
@@ -157,12 +170,12 @@ impl SpiceEnv {
             workspace_name: self.workspace.workspace_name(),
         };
         RevsetParseContext {
-            aliases_map: &self.revset_aliases,
+            aliases_map: &self.aliases.0,
             local_variables: Default::default(),
-            user_email: &self.user_email,
-            date_pattern_context: chrono::Local::now().into(),
+            user_email: self.settings.user_email(),
+            current_time: jiff::Zoned::now(),
             default_ignored_remote: Some(jj_lib::git::REMOTE_NAME_FOR_LOCAL_GIT_REPO),
-            use_glob_by_default: false,
+            fileset_aliases_map: &self.aliases.1,
             extensions: &self.revset_extensions,
             workspace: Some(workspace_ctx),
         }
@@ -202,7 +215,7 @@ impl SpiceEnv {
         let has_upstream = git_repo
             .remote_names()
             .iter()
-            .any(|n| n.as_ref() == b"upstream");
+            .any(|n| n.as_slice() == b"upstream");
         if has_upstream {
             return Some(RemoteNameBuf::from("upstream"));
         }
@@ -217,7 +230,7 @@ impl SpiceEnv {
         git_repo
             .remote_names()
             .iter()
-            .any(|n| n.as_ref() == remote.as_str().as_bytes())
+            .any(|n| n.as_slice() == remote.as_str().as_bytes())
     }
 
     /// Whether fork mode is active.
@@ -297,7 +310,7 @@ impl SpiceEnv {
             expression,
         );
 
-        let mut iter = evaluator.evaluate_to_commits()?.fuse();
+        let mut iter = block_on_stream(evaluator.evaluate_to_commits()?).fuse();
         match (iter.next(), iter.next()) {
             (Some(Ok(commit)), None) => Ok(commit.id().clone()),
             (Some(Err(e)), _) => Err(e.into()),
@@ -318,6 +331,14 @@ impl SpiceEnv {
         &self,
         revset_str: &str,
     ) -> Result<Arc<ResolvedRevsetExpression>, Box<dyn std::error::Error>> {
+        self.resolve_revset_in(self.repo.as_ref(), revset_str)
+    }
+
+    pub(crate) fn resolve_revset_in(
+        &self,
+        repo: &dyn jj_lib::repo::Repo,
+        revset_str: &str,
+    ) -> Result<Arc<ResolvedRevsetExpression>, Box<dyn std::error::Error>> {
         let context = self.revset_parse_context();
         let mut diagnostics = RevsetDiagnostics::new();
         let expression = jj_lib::revset::parse(&mut diagnostics, revset_str, &context)?;
@@ -325,7 +346,7 @@ impl SpiceEnv {
 
         let id_prefix_context = IdPrefixContext::default();
         let evaluator = RevsetExpressionEvaluator::new(
-            self.repo.as_ref(),
+            repo,
             self.revset_extensions.clone(),
             &id_prefix_context,
             expression,
@@ -444,12 +465,8 @@ fn load_config(
                 .map(|s| (ConfigArgKind::File, s.as_str())),
         )
         .collect();
-    if !config_args.is_empty() {
-        let layers = parse_config_args(&config_args).map_err(cmd_err)?;
-        let stacked: &mut jj_lib::config::StackedConfig = raw_config.as_mut();
-        for layer in layers {
-            stacked.add_layer(layer);
-        }
+    for layer in parse_config_args(&config_args).map_err(cmd_err)? {
+        raw_config.as_mut().add_layer(layer);
     }
 
     // Apply --quiet as highest-priority config override.
@@ -460,7 +477,8 @@ fn load_config(
         raw_config.as_mut().add_layer(layer);
     }
 
-    let config = config_env.resolve_config(&raw_config)?;
+    let mut config = config_env.resolve_config(&raw_config)?;
+    jj_lib::config::migrate(&mut config, &default_config_migrations())?;
     let ui = Ui::with_config(&config).map_err(cmd_err)?;
     Ok((config, ui, workspace_root, config_env))
 }
@@ -471,4 +489,87 @@ fn load_config(
 /// reach into its public `.error` field.
 pub(crate) fn cmd_err(e: jj_cli::command_error::CommandError) -> Box<dyn std::error::Error> {
     Box::from(format!("{}", e.error))
+}
+
+#[cfg(test)]
+pub(super) mod test_repo {
+    use std::path::Path;
+
+    use clap::Parser as _;
+    use jj_lib::commit::Commit;
+    use jj_lib::config::StackedConfig;
+    use jj_lib::git;
+    use jj_lib::ref_name::{RemoteName, WorkspaceName};
+    use jj_lib::repo::MutableRepo;
+
+    use super::*;
+    use crate::commands::cli::Cli;
+
+    pub(crate) async fn init(path: &Path, colocated: bool) -> SpiceEnv {
+        let settings =
+            UserSettings::from_config_and_home_dir(StackedConfig::with_defaults(), None).unwrap();
+        let hash_kind = gix::hash::Kind::Sha1;
+        if colocated {
+            Workspace::init_colocated_git(&settings, path, WorkspaceName::DEFAULT, hash_kind)
+                .await
+                .unwrap();
+        } else {
+            Workspace::init_internal_git(&settings, path, WorkspaceName::DEFAULT, hash_kind)
+                .await
+                .unwrap();
+        }
+        open(path, &[])
+    }
+
+    pub(crate) async fn commit(
+        repo: &mut MutableRepo,
+        parent: &CommitId,
+        description: &str,
+    ) -> Commit {
+        let tree = repo.store().empty_merged_tree();
+        repo.new_commit(vec![parent.clone()], tree)
+            .set_description(description)
+            .write()
+            .await
+            .unwrap()
+    }
+
+    pub(crate) async fn is_fresh(env: &SpiceEnv, repo: &ReadonlyRepo, commit: &Commit) -> bool {
+        use jj_lib::working_copy::WorkingCopyFreshness;
+        let locked = env.workspace.working_copy().start_mutation().await.unwrap();
+        WorkingCopyFreshness::check_stale(locked.as_ref(), commit, repo)
+            .await
+            .unwrap()
+            == WorkingCopyFreshness::Fresh
+    }
+
+    pub(crate) fn add_origin(repo: &mut MutableRepo, origin: &SpiceEnv) {
+        let remote_git = git::get_git_repo(origin.repo.store()).unwrap();
+        git::add_remote(
+            repo,
+            RemoteName::new("origin"),
+            remote_git.git_dir().to_str().unwrap(),
+            None,
+        )
+        .unwrap();
+    }
+
+    pub(crate) fn open(path: &Path, config: &[&str]) -> SpiceEnv {
+        let mut args =
+            Cli::try_parse_from(["jj-spice", "-R", path.to_str().unwrap(), "stack", "log"])
+                .unwrap()
+                .global_args;
+        args.early_args.config = [
+            "user.name='Test User'",
+            "user.email='test@example.com'",
+            "signing.backend='test'",
+            "signing.behavior='drop'",
+            "revset-aliases.'immutable_heads()'='root()'",
+        ]
+        .into_iter()
+        .chain(config.iter().copied())
+        .map(str::to_owned)
+        .collect();
+        SpiceEnv::init(&args).unwrap()
+    }
 }

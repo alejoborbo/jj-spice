@@ -1,3 +1,4 @@
+use futures::executor::block_on_stream;
 use itertools::Itertools;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -147,8 +148,7 @@ impl<'a> BookmarkGraph<'a> {
         let expression = trunk_expr.range(&head_expr).roots().descendants();
 
         let revset = expression.evaluate(repo)?;
-        let reversed =
-            reverse_graph(revset.iter_graph(), |id| id).expect("commit graph should be acyclic");
+        let reversed = reverse_graph(block_on_stream(revset.stream_graph()), |id| id)?;
         let (nodes, edges, descendants) =
             Self::build_bookmark_graph(&reversed, &bookmarks_per_commit);
         let head_bookmarks = Self::find_head_bookmarks(&edges);
@@ -198,8 +198,7 @@ impl<'a> BookmarkGraph<'a> {
     ) -> Result<Self, BookmarkGraphError> {
         let bookmarks_per_commit = Self::build_bookmark_commit_map(repo);
         let revset = expression.evaluate(repo)?;
-        let reversed =
-            reverse_graph(revset.iter_graph(), |id| id).expect("commit graph should be acyclic");
+        let reversed = reverse_graph(block_on_stream(revset.stream_graph()), |id| id)?;
         let (nodes, edges, descendants) =
             Self::build_bookmark_graph(&reversed, &bookmarks_per_commit);
         let head_bookmarks = Self::find_head_bookmarks(&edges);
@@ -289,7 +288,10 @@ impl<'a> BookmarkGraph<'a> {
         let trunk_expr = RevsetExpression::commit(trunk.clone());
         let range = trunk_expr.range(heads);
         let revset = range.evaluate(repo)?;
-        Ok(reverse_graph(revset.iter_graph(), |id| id).expect("commit graph should be acyclic"))
+        Ok(reverse_graph(
+            block_on_stream(revset.stream_graph()),
+            |id| id,
+        )?)
     }
 
     /// Build a map from commit ID to all bookmarks that point to it.
@@ -459,7 +461,8 @@ impl<'a> BookmarkGraph<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jj_lib::op_store::{LocalRemoteRefTarget, RefTarget};
+    use crate::bookmark::ABSENT_TARGET;
+    use jj_lib::op_store::LocalRemoteRefTarget;
 
     fn commit_id(byte: u8) -> CommitId {
         CommitId::new(vec![byte])
@@ -469,7 +472,7 @@ mod tests {
         Bookmark::new(
             name.to_string(),
             LocalRemoteRefTarget {
-                local_target: RefTarget::absent_ref(),
+                local_target: &ABSENT_TARGET,
                 remote_refs: vec![],
             },
         )
