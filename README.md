@@ -106,8 +106,11 @@ jj-spice stack submit
 Discover existing change requests on the remote and start tracking them locally.
 
 ```bash
-# Sync untracked bookmarks
+# Sync the current stack
 jj-spice stack sync
+
+# Sync all bookmark stacks above trunk
+jj-spice stack sync --all
 
 # Re-sync already-tracked bookmarks
 jj-spice stack sync --force

@@ -164,6 +164,9 @@ pub struct SubmitArgs {
     ("spice.auto-clean", "Remove stale/inactive CRs from tracking automatically (bool, default: true)."),
 ]))]
 pub struct SyncArgs {
+    /// Sync all bookmark stacks above trunk.
+    #[arg(long)]
+    pub all: bool,
     /// Re-discover change requests even for bookmarks that are already tracked.
     #[arg(long)]
     pub force: bool,
@@ -175,7 +178,7 @@ pub struct SyncArgs {
     /// By default, jj-spice will only track change requests that are open, or in draft.
     #[arg(long, default_value_t = false)]
     pub allow_inactive: bool,
-    /// Restack the current stack onto trunk.
+    /// Restack the selected stacks onto trunk.
     ///
     /// By default, latest version of the trunk is fetched, but the stack is not rebased.
     #[arg(long)]
@@ -355,8 +358,34 @@ mod tests {
         match cli.command {
             SpiceCommand::Stack(StackArgs {
                 command: StackCommand::Sync(args),
-            }) => assert!(!args.force),
+            }) => {
+                assert!(!args.force);
+                assert!(!args.all);
+            }
             _ => panic!("expected Sync"),
+        }
+    }
+
+    #[test]
+    fn parse_stack_sync_with_all() {
+        for flags in [
+            vec!["--all"],
+            vec!["--all", "--force", "--allow-inactive", "--restack"],
+        ] {
+            let combined = flags.len() > 1;
+            let cli = Cli::try_parse_from(["jj-spice", "stack", "sync"].into_iter().chain(flags))
+                .unwrap();
+            let SpiceCommand::Stack(StackArgs {
+                command: StackCommand::Sync(args),
+            }) = cli.command
+            else {
+                panic!("expected Sync");
+            };
+            assert!(args.all);
+            assert_eq!(
+                (args.force, args.allow_inactive, args.restack),
+                (combined, combined, combined)
+            );
         }
     }
 
