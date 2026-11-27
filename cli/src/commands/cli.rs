@@ -177,7 +177,7 @@ pub struct SyncArgs {
     pub allow_inactive: bool,
     /// Restack the current stack onto trunk.
     ///
-    /// By default, latest version of the trunk is fetched, but the stack is not rebased.
+    /// Sync fetches tracked bookmarks by default. This flag also rebases the stack onto trunk.
     #[arg(long)]
     pub restack: bool,
 }

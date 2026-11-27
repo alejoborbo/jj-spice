@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::sync::Arc;
 
@@ -16,7 +16,7 @@ use jj_lib::rewrite::{
     MoveCommitsLocation, MoveCommitsStats, MoveCommitsTarget, RebaseOptions, move_commits,
 };
 use jj_lib::settings::RemoteSettingsMap;
-use jj_lib::str_util::{StringExpression, StringPattern};
+use jj_lib::str_util::StringExpression;
 use jj_spice_lib::bookmark::Bookmark;
 use jj_spice_lib::bookmark::graph::{BookmarkGraph, BookmarkNode};
 use jj_spice_lib::forge::Forge;
@@ -67,10 +67,7 @@ pub async fn run(
     // Prompt for unmatched remotes (grouped by hostname).
     resolve_unmatched_remotes(env, &unmatched, &mut forges)?;
 
-    // Fetch the latest remote changes for the trunk branch.
-    // The returned repo reflects the fetched state so subsequent operations
-    // see the up-to-date trunk.
-    let repo_after_fetch = fetch_trunk(env, trunk_name).await?;
+    let repo_after_fetch = fetch_tracked_bookmarks(env).await?;
     let head = repo_after_fetch
         .view()
         .get_wc_commit_id(env.workspace.workspace_name())
@@ -276,24 +273,16 @@ fn resolve_unmatched_remotes(
     Ok(())
 }
 
-/// Fetch the latest remote changes for trunk.
-///
-/// Returns the committed repo snapshot so callers see the updated trunk
-/// position instead of the stale `env.repo`.
-async fn fetch_trunk(
+/// Fetch tracked bookmarks and return the updated repository snapshot.
+async fn fetch_tracked_bookmarks(
     env: &SpiceEnv,
-    trunk_name: &str,
 ) -> Result<Arc<ReadonlyRepo>, Box<dyn std::error::Error>> {
     let remote_settings = env.settings.remote_settings()?;
-    let fetch_remotes = trunk_fetch_remotes(env, trunk_name, &remote_settings)?;
-    if fetch_remotes.is_empty() {
+    let fetch_bookmarks = tracked_fetch_bookmarks(env, &remote_settings)?;
+    if fetch_bookmarks.is_empty() {
         return Ok(env.repo.clone());
     }
 
-    let expression = GitFetchRefExpression {
-        bookmark: StringExpression::Pattern(Box::new(StringPattern::Exact(trunk_name.to_owned()))),
-        tag: StringExpression::none(),
-    };
     let mut tx = env.repo.start_transaction();
     let import_options =
         load_git_import_options(&env.ui, &env.git_settings, &remote_settings).map_err(cmd_err)?;
@@ -303,8 +292,11 @@ async fn fetch_trunk(
         &import_options,
     )?;
 
-    // Fetch changes from each remote
-    for remote in fetch_remotes {
+    for (remote, bookmark) in fetch_bookmarks {
+        let expression = GitFetchRefExpression {
+            bookmark,
+            tag: StringExpression::none(),
+        };
         let mut callback = GitSubprocessUi::new(&env.ui);
         git_fetch.fetch(remote, &expression, &mut callback, None)?;
     }
@@ -312,32 +304,41 @@ async fn fetch_trunk(
     tx.repo_mut().rebase_descendants().await?;
 
     if tx.repo().has_changes() {
-        Ok(tx.commit("fetch trunk").await?)
+        Ok(tx.commit("fetch tracked bookmarks").await?)
     } else {
         Ok(env.repo.clone())
     }
 }
 
-fn trunk_fetch_remotes<'a>(
+fn tracked_fetch_bookmarks<'a>(
     env: &'a SpiceEnv,
-    trunk_name: &str,
     settings: &RemoteSettingsMap,
-) -> Result<Vec<&'a RemoteName>, Box<dyn std::error::Error>> {
-    let mut remotes = Vec::new();
+) -> Result<Vec<(&'a RemoteName, StringExpression)>, Box<dyn std::error::Error>> {
+    let mut by_remote = BTreeMap::<_, Vec<_>>::new();
     for (symbol, target) in env.repo.view().all_remote_bookmarks() {
-        if symbol.name.as_str() != trunk_name
-            || symbol.remote == REMOTE_NAME_FOR_LOCAL_GIT_REPO
-            || !target.is_tracked()
-        {
-            continue;
-        }
-        let configured =
-            parse_remote_fetch_bookmarks(&env.ui, settings, symbol.remote).map_err(cmd_err)?;
-        if configured.is_none_or(|expr| expr.to_matcher().is_match(trunk_name)) {
-            remotes.push(symbol.remote);
+        if symbol.remote != REMOTE_NAME_FOR_LOCAL_GIT_REPO && target.is_tracked() {
+            by_remote
+                .entry(symbol.remote)
+                .or_default()
+                .push(symbol.name);
         }
     }
-    Ok(remotes)
+
+    let mut fetch_bookmarks = Vec::new();
+    for (remote, names) in by_remote {
+        let configured =
+            parse_remote_fetch_bookmarks(&env.ui, settings, remote).map_err(cmd_err)?;
+        let matcher = configured.as_ref().map(StringExpression::to_matcher);
+        let bookmarks: Vec<_> = names
+            .into_iter()
+            .filter(|name| matcher.as_ref().is_none_or(|m| m.is_match(name.as_str())))
+            .map(StringExpression::exact)
+            .collect();
+        if !bookmarks.is_empty() {
+            fetch_bookmarks.push((remote, StringExpression::union_all(bookmarks)));
+        }
+    }
+    Ok(fetch_bookmarks)
 }
 
 /// Restack the bookmark graph on top of the trunk branch.
@@ -577,25 +578,43 @@ mod tests {
     use crate::commands::env::test_repo;
 
     #[tokio::test]
-    async fn fetch_trunk_honors_patterns_and_rebases_descendants_of_rewritten_trunk() {
+    async fn fetch_tracked_bookmarks_updates_and_prunes_refs_across_remotes() {
         let origin_path = tempfile::tempdir().unwrap();
         let local_path = tempfile::tempdir().unwrap();
         let origin = test_repo::init(origin_path.path(), true).await;
         let local = test_repo::init(local_path.path(), false).await;
         let trunk = RefName::new("main");
         let origin_name = RemoteName::new("origin");
+        let fork_name = RemoteName::new("fork");
+        let feature = RefName::new("feature");
+        let merged = RefName::new("merged");
+        let side = RefName::new("side");
         let root = origin.repo.store().root_commit_id();
 
         let mut tx = origin.repo.start_transaction();
         let first = test_repo::commit(tx.repo_mut(), root, "Initial trunk").await;
-        tx.repo_mut()
-            .set_local_bookmark_target(trunk, RefTarget::normal(first.id().clone()));
+        for name in [trunk, feature, merged, side] {
+            tx.repo_mut()
+                .set_local_bookmark_target(name, RefTarget::normal(first.id().clone()));
+        }
         git::export_refs(tx.repo_mut()).unwrap();
-        let origin_repo = tx.commit("Set trunk").await.unwrap();
+        let origin_repo = tx.commit("Set remote bookmarks").await.unwrap();
 
         let mut tx = local.repo.start_transaction();
         test_repo::add_origin(tx.repo_mut(), &origin);
         tx.commit("Add origin").await.unwrap();
+
+        let local = test_repo::open(local_path.path(), &[]);
+        let mut tx = local.repo.start_transaction();
+        let remote_git = git::get_git_repo(origin.repo.store()).unwrap();
+        git::add_remote(
+            tx.repo_mut(),
+            fork_name,
+            remote_git.git_dir().to_str().unwrap(),
+            None,
+        )
+        .unwrap();
+        tx.commit("Add fork").await.unwrap();
         let local = test_repo::open(local_path.path(), &[]);
         let mut tx = local.repo.start_transaction();
         let import_options = load_git_import_options(
@@ -610,27 +629,33 @@ mod tests {
             &import_options,
         )
         .unwrap();
-        fetch
-            .fetch(
-                origin_name,
-                &GitFetchRefExpression {
-                    bookmark: StringExpression::Pattern(Box::new(StringPattern::Exact(
-                        trunk.as_str().to_owned(),
-                    ))),
-                    tag: StringExpression::none(),
-                },
-                &mut GitSubprocessUi::new(&local.ui),
-                None,
-            )
-            .unwrap();
+        for remote in [origin_name, fork_name] {
+            fetch
+                .fetch(
+                    remote,
+                    &GitFetchRefExpression {
+                        bookmark: StringExpression::all(),
+                        tag: StringExpression::none(),
+                    },
+                    &mut GitSubprocessUi::new(&local.ui),
+                    None,
+                )
+                .unwrap();
+        }
         fetch.import_refs().await.unwrap();
-        tx.repo_mut()
-            .track_remote_bookmark(trunk.to_remote_symbol(origin_name))
-            .await
-            .unwrap();
-        let repo = tx.commit("Track trunk").await.unwrap();
+        for (name, remote) in [
+            (trunk, origin_name),
+            (merged, origin_name),
+            (feature, fork_name),
+        ] {
+            tx.repo_mut()
+                .track_remote_bookmark(name.to_remote_symbol(remote))
+                .await
+                .unwrap();
+        }
+        let repo = tx.commit("Track remote bookmarks").await.unwrap();
         assert_eq!(
-            repo.view().get_local_bookmark(trunk).as_normal(),
+            repo.view().get_local_bookmark(merged).as_normal(),
             Some(first.id())
         );
 
@@ -649,40 +674,51 @@ mod tests {
             .write()
             .await
             .unwrap();
+        for name in [trunk, feature, side] {
+            tx.repo_mut()
+                .set_local_bookmark_target(name, RefTarget::normal(rewritten.id().clone()));
+        }
         tx.repo_mut()
-            .set_local_bookmark_target(trunk, RefTarget::normal(rewritten.id().clone()));
-        let side = RefName::new("side");
-        tx.repo_mut()
-            .set_local_bookmark_target(side, RefTarget::normal(rewritten.id().clone()));
+            .set_local_bookmark_target(merged, RefTarget::absent());
         tx.repo_mut().rebase_descendants().await.unwrap();
         git::export_refs(tx.repo_mut()).unwrap();
         tx.commit("Rewrite trunk").await.unwrap();
 
         let excluded = test_repo::open(
             local_path.path(),
-            &["remotes.origin.fetch-bookmarks='~main'"],
+            &[
+                "remotes.origin.fetch-bookmarks='side'",
+                "remotes.fork.fetch-bookmarks='~feature'",
+            ],
         );
-        let repo = fetch_trunk(&excluded, trunk.as_str()).await.unwrap();
-        assert_eq!(
-            repo.view().get_local_bookmark(trunk).as_normal(),
-            Some(first.id())
-        );
+        let repo = fetch_tracked_bookmarks(&excluded).await.unwrap();
+        assert_eq!(repo.op_id(), excluded.repo.op_id());
 
         let included = test_repo::open(
             local_path.path(),
-            &["remotes.origin.fetch-bookmarks='main | side'"],
+            &["remotes.origin.fetch-bookmarks='main | merged | side'"],
         );
-        let repo = fetch_trunk(&included, trunk.as_str()).await.unwrap();
-        assert_eq!(
-            repo.view().get_local_bookmark(trunk).as_normal(),
-            Some(rewritten.id())
-        );
-        assert!(
-            repo.view()
-                .get_remote_bookmark(side.to_remote_symbol(origin_name))
-                .target
-                .is_absent()
-        );
+        let repo = fetch_tracked_bookmarks(&included).await.unwrap();
+        for name in [trunk, feature] {
+            assert_eq!(
+                repo.view().get_local_bookmark(name).as_normal(),
+                Some(rewritten.id())
+            );
+        }
+        assert!(repo.view().get_local_bookmark(merged).is_absent());
+        for (name, remote) in [
+            (side, origin_name),
+            (feature, origin_name),
+            (trunk, fork_name),
+        ] {
+            assert_eq!(
+                repo.view()
+                    .get_remote_bookmark(name.to_remote_symbol(remote))
+                    .target
+                    .as_normal(),
+                Some(first.id())
+            );
+        }
         let tip = repo.view().get_local_bookmark(topic).as_normal().unwrap();
         let rebased = repo.store().get_commit(tip).unwrap();
         assert_eq!(rebased.change_id(), child.change_id());
