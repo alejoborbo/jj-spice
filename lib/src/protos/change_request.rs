@@ -12,7 +12,7 @@ pub struct ChangeRequests {
 /// Wrapper for the forge-specific oneof.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ForgeMeta {
-    #[prost(oneof = "forge_meta::Forge", tags = "10, 11")]
+    #[prost(oneof = "forge_meta::Forge", tags = "10, 11, 12")]
     pub forge: ::core::option::Option<forge_meta::Forge>,
 }
 /// Nested message and enum types in `ForgeMeta`.
@@ -23,6 +23,8 @@ pub mod forge_meta {
         Github(super::GitHubMeta),
         #[prost(message, tag = "11")]
         Gitlab(super::GitLabMeta),
+        #[prost(message, tag = "12")]
+        Gitea(super::GiteaMeta),
     }
 }
 /// GitHub Pull Request identity.
@@ -69,6 +71,22 @@ pub struct GitLabMeta {
     #[prost(uint64, optional, tag = "5")]
     pub source_project_id: ::core::option::Option<u64>,
     /// comment ID, for updating the stack trace in the Merge Request
+    #[prost(uint64, optional, tag = "6")]
+    pub comment_id: ::core::option::Option<u64>,
+}
+/// Gitea pull request identity.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GiteaMeta {
+    #[prost(uint64, tag = "1")]
+    pub number: u64,
+    #[prost(string, tag = "2")]
+    pub source_branch: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub target_branch: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub source_repo: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub target_repo: ::prost::alloc::string::String,
     #[prost(uint64, optional, tag = "6")]
     pub comment_id: ::core::option::Option<u64>,
 }

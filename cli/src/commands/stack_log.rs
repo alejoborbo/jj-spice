@@ -687,6 +687,7 @@ fn format_meta_id(meta: &ForgeMeta) -> String {
     match &meta.forge {
         Some(ForgeOneof::Github(gh)) => gh.number.to_string(),
         Some(ForgeOneof::Gitlab(gl)) => format!("!{}", gl.iid),
+        Some(ForgeOneof::Gitea(ga)) => ga.number.to_string(),
         None => "?".to_string(),
     }
 }

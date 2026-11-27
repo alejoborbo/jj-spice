@@ -69,7 +69,7 @@ pub enum SpiceCommand {
 #[command(after_long_help = config_after_help(&[
     ("spice.output",                 "Terminal output fidelity: \"modern\" (default) or \"classic\""),
     ("spice.upstream-remote",        "Override the upstream remote name for fork workflows (string)"),
-    ("spice.forges.<hostname>.type", "Forge type for a custom hostname: \"github\" or \"gitlab\""),
+    ("spice.forges.<hostname>.type", "Forge type for a custom hostname: \"github\", \"gitlab\", or \"gitea\""),
 ]))]
 pub struct StackArgs {
     /// The stack operation to perform.

@@ -1,5 +1,7 @@
 /// Forge detection from git remote URLs and jj config.
 pub mod detect;
+/// Gitea backend.
+pub mod gitea;
 /// GitHub / GitHub Enterprise backend.
 pub mod github;
 /// GitLab backend.

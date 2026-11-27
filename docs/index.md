@@ -15,3 +15,4 @@ the PRs, keeping their base branches in sync, and tracking their status.
 
 The following version control systems are supported:
 - [GitHub](https://github.com)
+- [Gitea](https://about.gitea.com)

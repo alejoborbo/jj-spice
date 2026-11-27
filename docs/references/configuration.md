@@ -16,7 +16,7 @@ For details on how jj resolves its configuration, see the
 | [`spice.auto-accept-changes`](#spiceauto-accept-changes) | `bool` | `false` | `--auto-accept` |
 | [`spice.auto-clean`](#spiceauto-clean) | `bool` | `true` | -- |
 | [`spice.upstream-remote`](#spiceupstream-remote) | `string` | auto-detected | -- |
-| [`spice.forges.<hostname>.type`](#spiceforgeshostnametype) | `"github"` \| `"gitlab"` | auto-detected | -- |
+| [`spice.forges.<hostname>.type`](#spiceforgeshostnametype) | `"github"` \| `"gitlab"` \| `"gitea"` | auto-detected | -- |
 
 ## `spice.output`
 
@@ -88,7 +88,7 @@ upstream-remote = "upstream"
 
 Register a custom hostname as a specific forge type.
 
-`jj-spice` automatically recognises `github.com` and `gitlab.com`. For
+`jj-spice` automatically recognises `github.com`, `gitlab.com`, and `gitea.com`. For
 self-hosted instances (GitHub Enterprise, self-managed GitLab, etc.),
 map the hostname to a forge type so that `jj-spice` can interact with its
 API.
@@ -102,6 +102,12 @@ type. It can also be set manually.
 type = "github"
 ```
 
-Accepted values: `"github"`, `"gitlab"`.
+Accepted values: `"github"`, `"gitlab"`, `"gitea"`.
+
+For a self-hosted Gitea server, set `type = "gitea"` under its hostname.
+`jj-spice` uses HTTPS to access the API at the root of that host. Set
+`GITEA_TOKEN` to a personal access token. For `stack submit`, the token
+needs write access to repositories and issues so it can create pull requests
+and add stack comments. Draft submission uses Gitea's default `WIP:` prefix.
 
 **Affects:** all `stack` subcommands.

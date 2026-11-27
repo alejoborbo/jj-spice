@@ -271,6 +271,7 @@ impl<'a> Comment<'a> {
                 // so we cannot construct a fallback URL from metadata alone.
                 (Some(label), None)
             }
+            Some(Forge::Gitea(ga)) => (Some(format!("#{}", ga.number)), None),
             None => (None, None),
         }
     }
@@ -560,6 +561,41 @@ mod tests {
 
         assert!(child_a_pos < root_pos, "child-a should be above root");
         assert!(child_b_pos < root_pos, "child-b should be above root");
+    }
+
+    #[test]
+    fn gitea_graph_uses_live_pr_link() {
+        use crate::protos::change_request::GiteaMeta;
+
+        let bookmark = make_bookmark("feat-a");
+        let graph = BookmarkGraph::for_testing(vec!["feat-a".into()], BTreeMap::new());
+        let mut crs = ChangeRequests::default();
+        crs.set(
+            "feat-a".into(),
+            ForgeMeta {
+                forge: Some(Forge::Gitea(GiteaMeta {
+                    number: 7,
+                    source_branch: "feat-a".into(),
+                    target_branch: "main".into(),
+                    ..Default::default()
+                })),
+            },
+        );
+        let url = "https://git.example.com/acme/widget/pulls/7";
+        let live = BTreeMap::from([(
+            "feat-a".into(),
+            LiveCrData {
+                status: ChangeStatus::Open,
+                title: "Feature".into(),
+                url: url.into(),
+            },
+        )]);
+        let output = Comment::new(&bookmark, &graph, &crs)
+            .with_live_data(&live)
+            .to_string()
+            .unwrap();
+        assert!(output.contains(&format!("<a href=\"{url}\">")));
+        assert!(output.contains("#7"));
     }
 
     // -- GitLab tests --
