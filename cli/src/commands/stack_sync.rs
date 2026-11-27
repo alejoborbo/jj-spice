@@ -18,7 +18,7 @@ use jj_lib::rewrite::{
 use jj_lib::settings::RemoteSettingsMap;
 use jj_lib::str_util::{StringExpression, StringPattern};
 use jj_spice_lib::bookmark::Bookmark;
-use jj_spice_lib::bookmark::graph::{BookmarkGraph, BookmarkNode};
+use jj_spice_lib::bookmark::graph::{BookmarkGraph, BookmarkGraphError, BookmarkNode};
 use jj_spice_lib::forge::Forge;
 use jj_spice_lib::forge::detect::{
     DetectionResult, FORGE_TYPES, UnmatchedRemote, build_forge_for_type, detect_forges,
@@ -43,11 +43,10 @@ enum BookmarkSyncError {
     Io(#[from] std::io::Error),
 }
 
-/// Discover and track change requests for each bookmark in the stack.
+/// Discover and track change requests for bookmarks in the selected stacks.
 ///
-/// For each bookmark between trunk and the working copy, queries the detected
-/// forges for existing change requests and persists their identity metadata
-/// locally.
+/// Queries the detected forges for existing change requests and stores their
+/// metadata locally. By default, only the active stack is selected.
 ///
 /// When remotes are found with parseable URLs but no recognised forge hostname,
 /// the user is prompted (once per unique hostname) to select a forge type.
@@ -67,37 +66,15 @@ pub async fn run(
     // Prompt for unmatched remotes (grouped by hostname).
     resolve_unmatched_remotes(env, &unmatched, &mut forges)?;
 
-    // Fetch the latest remote changes for the trunk branch.
-    // The returned repo reflects the fetched state so subsequent operations
-    // see the up-to-date trunk.
-    let repo_after_fetch = fetch_trunk(env, trunk_name).await?;
-    let head = repo_after_fetch
-        .view()
-        .get_wc_commit_id(env.workspace.workspace_name())
-        .unwrap_or(head)
-        .clone();
-
-    // Re-resolve trunk from the updated view — the bookmark may have advanced
-    // after the fetch (e.g. new merge commits on main).
-    let trunk = repo_after_fetch
-        .view()
-        .get_local_bookmark(RefName::new(trunk_name))
-        .as_normal()
-        .cloned()
-        .unwrap_or_else(|| trunk.clone());
-
-    // Build the bookmark graph. If the `--restack` flag is specified, rebase the
-    // stack onto trunk first, then build the graph from the updated repo state.
+    let (repo, trunk) = fetch_sync_trunk(env, trunk, trunk_name).await?;
     let active_repo = if args.restack {
-        // Build a temporary graph to discover root bookmarks, then rebase.
-        let initial_graph =
-            BookmarkGraph::build_active_graph(repo_after_fetch.as_ref(), &trunk, &head)?;
-        let root_bookmarks = initial_graph.root_bookmarks.clone();
-        restack_graph(env, &repo_after_fetch, &root_bookmarks, &trunk).await?
+        let graph = build_sync_graph(&repo, &trunk, sync_head(env, &repo, head), args.all)?;
+        restack_graph(env, &repo, graph.root_bookmarks(), &trunk).await?
     } else {
-        repo_after_fetch
+        repo
     };
-    let graph = BookmarkGraph::build_active_graph(active_repo.as_ref(), &trunk, &head)?;
+    let head = sync_head(env, &active_repo, head);
+    let graph = build_sync_graph(&active_repo, &trunk, head, args.all)?;
 
     let spice_store = SpiceStore::init_at(env.workspace.repo_path())?;
     let cr_store = ChangeRequestStore::new(&spice_store);
@@ -143,6 +120,41 @@ pub async fn run(
 
     cr_store.save(&state)?;
     Ok(())
+}
+
+async fn fetch_sync_trunk(
+    env: &SpiceEnv,
+    trunk: &CommitId,
+    trunk_name: &str,
+) -> Result<(Arc<ReadonlyRepo>, CommitId), Box<dyn std::error::Error>> {
+    let repo = fetch_trunk(env, trunk_name).await?;
+    // Fetch can advance trunk before graph selection.
+    let trunk = repo
+        .view()
+        .get_local_bookmark(RefName::new(trunk_name))
+        .as_normal()
+        .unwrap_or(trunk)
+        .clone();
+    Ok((repo, trunk))
+}
+
+fn sync_head<'a>(env: &SpiceEnv, repo: &'a ReadonlyRepo, fallback: &'a CommitId) -> &'a CommitId {
+    repo.view()
+        .get_wc_commit_id(env.workspace.workspace_name())
+        .unwrap_or(fallback)
+}
+
+fn build_sync_graph<'a>(
+    repo: &'a ReadonlyRepo,
+    trunk: &CommitId,
+    head: &CommitId,
+    all: bool,
+) -> Result<BookmarkGraph<'a>, BookmarkGraphError> {
+    if all {
+        BookmarkGraph::all_local(repo, trunk)
+    } else {
+        BookmarkGraph::build_active_graph(repo, trunk, head)
+    }
 }
 
 /// Remove stale and inactive entries from the CR store during sync.
@@ -351,17 +363,20 @@ async fn restack_graph(
     root_bookmarks: &[String],
     trunk: &CommitId,
 ) -> Result<Arc<ReadonlyRepo>, Box<dyn std::error::Error>> {
-    // Collect the tip commit IDs of all root bookmarks.
-    let view = repo.view();
-    let mut root_tip_ids = Vec::with_capacity(root_bookmarks.len());
-    for bookmark in root_bookmarks {
-        let commit_id = view
-            .get_local_bookmark(RefName::new(bookmark.as_str()))
-            .as_normal()
-            .ok_or_else(|| format!("could not find root bookmark: {bookmark}"))?
-            .clone();
-        root_tip_ids.push(commit_id);
+    if root_bookmarks.is_empty() {
+        return Ok(repo.clone());
     }
+
+    let root_tip_ids = root_bookmarks
+        .iter()
+        .map(|bookmark| {
+            repo.view()
+                .get_local_bookmark(RefName::new(bookmark))
+                .as_normal()
+                .cloned()
+                .ok_or_else(|| format!("could not find root bookmark: {bookmark}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Compute roots relative to the destination, matching jj's rebase --source logic.
     // This excludes commits that are already ancestors of trunk.
@@ -703,6 +718,55 @@ mod tests {
             })),
         };
         assert_eq!(meta.to_string(), "GitHub PR #42 (feat → main)");
+    }
+
+    #[tokio::test]
+    async fn sync_all_selects_and_restacks_disjoint_stacks() {
+        let path = tempfile::tempdir().unwrap();
+        let env = test_repo::init(path.path(), false).await;
+        let root = env.repo.store().root_commit_id().clone();
+        let mut tx = env.repo.start_transaction();
+        let trunk = test_repo::commit(tx.repo_mut(), &root, "Trunk").await;
+        let first = test_repo::commit(tx.repo_mut(), &root, "First stack").await;
+        let second = test_repo::commit(tx.repo_mut(), &root, "Second stack").await;
+        for (name, commit) in [("main", &trunk), ("first", &first), ("second", &second)] {
+            tx.repo_mut().set_local_bookmark_target(
+                RefName::new(name),
+                RefTarget::normal(commit.id().clone()),
+            );
+        }
+        let repo = tx.commit("Build disjoint stacks").await.unwrap();
+
+        let active = build_sync_graph(&repo, trunk.id(), first.id(), false).unwrap();
+        assert_eq!(active.root_bookmarks(), ["first"]);
+        let all = build_sync_graph(&repo, trunk.id(), first.id(), true).unwrap();
+        assert_eq!(all.root_bookmarks(), ["first", "second"]);
+        let from_trunk = build_sync_graph(&repo, trunk.id(), trunk.id(), true).unwrap();
+        assert_eq!(from_trunk.iter_graph().unwrap().count(), 2);
+        assert_eq!(all.root_bookmarks(), from_trunk.root_bookmarks());
+
+        let restacked = restack_graph(&env, &repo, all.root_bookmarks(), trunk.id())
+            .await
+            .unwrap();
+        for (name, before) in [("first", &first), ("second", &second)] {
+            let target = restacked.view().get_local_bookmark(RefName::new(name));
+            let after = restacked
+                .store()
+                .get_commit(target.as_normal().unwrap())
+                .unwrap();
+            assert_eq!(after.change_id(), before.change_id());
+            assert_eq!(after.parent_ids(), [trunk.id().clone()]);
+        }
+    }
+
+    #[tokio::test]
+    async fn restack_without_roots_preserves_repo() {
+        let path = tempfile::tempdir().unwrap();
+        let env = test_repo::init(path.path(), false).await;
+        let repo = restack_graph(&env, &env.repo, &[], env.repo.store().root_commit_id())
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&repo, &env.repo));
     }
 
     async fn restack_working_copy(colocated: bool) -> bool {
