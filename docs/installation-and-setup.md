@@ -1,3 +1,9 @@
+---
+description: >-
+  Install jj-spice via Homebrew, Cargo, Scoop, Winget, or from source.
+  Configure terminal output, shell completion, and jj aliases.
+---
+
 # Installation and setup
 
 ## Installation

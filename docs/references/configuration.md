@@ -1,3 +1,9 @@
+---
+description: >-
+  Complete reference for jj-spice configuration — output mode,
+  auto-accept, auto-clean, upstream remote, and custom forge hostnames.
+---
+
 # Configuration reference
 
 `jj-spice` is configured through the standard jj configuration stack. All

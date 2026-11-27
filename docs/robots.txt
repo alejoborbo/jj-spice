@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://alejoborbo.github.io/jj-spice/sitemap.xml
