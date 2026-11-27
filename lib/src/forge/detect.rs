@@ -8,17 +8,23 @@ use thiserror::Error;
 use url::Url;
 
 use super::Forge;
+use super::gitea::GiteaForge;
 use super::github::{GitHubForge, build_octocrab_for_github};
 use super::gitlab::{GitLabForge, build_gitlab_client};
 use crate::protos::change_request::ForgeMeta;
 
 /// Supported forge type identifiers for interactive selection and config
 /// persistence.
-pub const FORGE_TYPES: &[&str] = &["github", "gitlab"];
+pub const FORGE_TYPES: &[&str] = &["github", "gitlab", "gitea"];
 
 /// Intermediate detection result before constructing a forge client.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum DetectedForge {
+    Gitea {
+        owner: String,
+        repo: String,
+        host: String,
+    },
     GitHub {
         owner: String,
         repo: String,
@@ -150,6 +156,9 @@ fn build_forge(
     detected: DetectedForge,
 ) -> Result<Box<dyn Forge>, ForgeDetectionError> {
     match detected {
+        DetectedForge::Gitea { owner, repo, host } => {
+            build_forge_for_type(remote, "gitea", &owner, &repo, &host)
+        }
         DetectedForge::GitHub {
             owner,
             repo,
@@ -180,23 +189,11 @@ fn build_forge(
             project,
             base_url,
         } => {
-            let (client, token) =
-                build_gitlab_client().map_err(|e| ForgeDetectionError::ForgeCreation {
-                    remote: remote.to_string(),
-                    forge_type: "GitLab",
-                    source: Box::new(e),
-                })?;
             let host = base_url
                 .as_ref()
-                .and_then(|u| u.host_str().map(String::from))
-                .unwrap_or_else(|| "gitlab.com".to_string());
-            let project_path = format!("{group}/{project}");
-            Ok(Box::new(GitLabForge::new(
-                client,
-                host,
-                token,
-                project_path,
-            )))
+                .and_then(Url::host_str)
+                .unwrap_or("gitlab.com");
+            build_forge_for_type(remote, "gitlab", &group, &project, host)
         }
     }
 }
@@ -214,6 +211,13 @@ pub fn build_forge_for_type(
     hostname: &str,
 ) -> Result<Box<dyn Forge>, ForgeDetectionError> {
     match forge_type {
+        "gitea" => GiteaForge::from_env(hostname, (owner, repo))
+            .map(|forge| Box::new(forge) as Box<dyn Forge>)
+            .map_err(|source| ForgeDetectionError::ForgeCreation {
+                remote: remote.to_string(),
+                forge_type: "Gitea",
+                source: Box::new(source),
+            }),
         "github" => {
             let base_url = if hostname == "github.com" {
                 None
@@ -265,54 +269,40 @@ fn detect_forge_from_host(
     path: &gix::bstr::BStr,
     config: &StackedConfig,
 ) -> Option<DetectedForge> {
-    let path_str = std::str::from_utf8(path.as_ref()).ok()?;
-
-    // Check if this host is a known GitHub instance.
-    let (is_github, base_url) = if host == "github.com" {
-        (true, None)
-    } else {
-        // Check jj config for GHE: spice.forges.<hostname>.type = "github"
-        let key: &[&str] = &["spice", "forges", host, "type"];
-        match config.get::<String>(key) {
-            Ok(ref forge_type) if forge_type == "github" => (true, Some(ghe_api_url(host))),
-            _ => (false, None),
+    let (owner, repo) = parse_owner_repo(std::str::from_utf8(path.as_ref()).ok()?)?;
+    let configured;
+    let forge_type = match host {
+        "github.com" => "github",
+        "gitlab.com" => "gitlab",
+        "gitea.com" => "gitea",
+        _ => {
+            configured = config
+                .get::<String>(&["spice", "forges", host, "type"] as &[&str])
+                .ok()?;
+            &configured
         }
     };
 
-    if is_github {
-        let (owner, repo) = parse_owner_repo(path_str)?;
-        return Some(DetectedForge::GitHub {
+    match forge_type {
+        "github" => Some(DetectedForge::GitHub {
             owner,
             repo,
-            base_url,
-        });
+            base_url: (host != "github.com").then(|| ghe_api_url(host)),
+        }),
+        "gitlab" => Some(DetectedForge::GitLab {
+            group: owner,
+            project: repo,
+            base_url: (host != "gitlab.com").then(|| {
+                Url::parse(&format!("https://{host}")).expect("hostname should form a valid URL")
+            }),
+        }),
+        "gitea" => Some(DetectedForge::Gitea {
+            owner,
+            repo,
+            host: host.to_owned(),
+        }),
+        _ => None,
     }
-
-    // Check if this host is a known GitLab instance.
-    let is_gitlab = if host == "gitlab.com" {
-        true
-    } else {
-        let key: &[&str] = &["spice", "forges", host, "type"];
-        matches!(config.get::<String>(key), Ok(ref t) if t == "gitlab")
-    };
-
-    if is_gitlab {
-        let (group, project) = parse_owner_repo(path_str)?;
-        return Some(DetectedForge::GitLab {
-            group,
-            project,
-            base_url: if host == "gitlab.com" {
-                None
-            } else {
-                Some(
-                    Url::parse(&format!("https://{host}"))
-                        .expect("hostname should form a valid URL"),
-                )
-            },
-        });
-    }
-
-    None
 }
 
 /// Build the GitHub Enterprise API base URL for a given hostname.
@@ -537,6 +527,38 @@ mod tests {
             err.to_string().contains("unsupported forge type"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn detects_gitea_public_and_configured_hosts() {
+        use jj_lib::config::{ConfigLayer, ConfigSource};
+
+        let mut config = StackedConfig::with_defaults();
+        config.add_layer(
+            ConfigLayer::parse(
+                ConfigSource::Repo,
+                "[spice.forges.\"git.example.com\"]\ntype = \"gitea\"",
+            )
+            .unwrap(),
+        );
+        for (host, path) in [
+            ("gitea.com", "/acme/widget.git"),
+            ("git.example.com", "acme/widget.git"),
+        ] {
+            assert_eq!(
+                detect_forge_from_host(host, path.into(), &config),
+                Some(DetectedForge::Gitea {
+                    owner: "acme".into(),
+                    repo: "widget".into(),
+                    host: host.into(),
+                })
+            );
+        }
+        assert!(
+            detect_forge_from_host("unknown.example.com", "/acme/widget.git".into(), &config)
+                .is_none()
+        );
+        assert!(FORGE_TYPES.contains(&"gitea"));
     }
 
     // -- GitLab detection --

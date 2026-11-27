@@ -12,6 +12,7 @@ impl ForgeMeta {
         match &self.forge {
             Some(ForgeOneof::Github(gh)) => Some(&gh.target_branch),
             Some(ForgeOneof::Gitlab(gl)) => Some(&gl.target_branch),
+            Some(ForgeOneof::Gitea(ga)) => Some(&ga.target_branch),
             None => None,
         }
     }
@@ -21,6 +22,7 @@ impl ForgeMeta {
         match &self.forge {
             Some(ForgeOneof::Github(gh)) => Some(&gh.source_branch),
             Some(ForgeOneof::Gitlab(gl)) => Some(&gl.source_branch),
+            Some(ForgeOneof::Gitea(ga)) => Some(&ga.source_branch),
             None => None,
         }
     }
@@ -33,6 +35,7 @@ impl ForgeMeta {
     pub fn target_repo(&self) -> Option<&str> {
         match &self.forge {
             Some(ForgeOneof::Github(gh)) if !gh.target_repo.is_empty() => Some(&gh.target_repo),
+            Some(ForgeOneof::Gitea(ga)) if !ga.target_repo.is_empty() => Some(&ga.target_repo),
             // GitLab uses project IDs, not repo path strings for cross-repo.
             _ => None,
         }
@@ -43,6 +46,7 @@ impl ForgeMeta {
         match &self.forge {
             Some(ForgeOneof::Github(gh)) => gh.comment_id,
             Some(ForgeOneof::Gitlab(gl)) => gl.comment_id,
+            Some(ForgeOneof::Gitea(ga)) => ga.comment_id,
             None => None,
         }
     }
@@ -52,6 +56,7 @@ impl ForgeMeta {
         match &mut self.forge {
             Some(ForgeOneof::Github(gh)) => gh.comment_id = Some(id),
             Some(ForgeOneof::Gitlab(gl)) => gl.comment_id = Some(id),
+            Some(ForgeOneof::Gitea(ga)) => ga.comment_id = Some(id),
             None => {}
         }
     }
@@ -74,6 +79,11 @@ impl fmt::Display for ForgeMeta {
                     gl.iid, gl.source_branch, gl.target_branch
                 )
             }
+            Some(ForgeOneof::Gitea(ga)) => write!(
+                f,
+                "Gitea PR #{} ({} → {})",
+                ga.number, ga.source_branch, ga.target_branch
+            ),
             None => write!(f, "unknown forge"),
         }
     }
@@ -172,6 +182,35 @@ mod tests {
                 comment_id: None,
             })),
         }
+    }
+
+    #[test]
+    fn gitea_metadata_round_trips_through_store() {
+        use crate::protos::change_request::GiteaMeta;
+
+        let (_tmp, spice) = temp_cr_store();
+        let store = ChangeRequestStore::new(&spice);
+        let mut meta = ForgeMeta {
+            forge: Some(ForgeOneof::Gitea(GiteaMeta {
+                number: 7,
+                source_branch: "feat".into(),
+                target_branch: "main".into(),
+                source_repo: "fork/repo".into(),
+                target_repo: "owner/repo".into(),
+                comment_id: None,
+            })),
+        };
+        meta.set_comment_id(35);
+        let mut state = ChangeRequests::default();
+        state.set("feat".into(), meta.clone());
+        store.save(&state).unwrap();
+        let loaded = store.load().unwrap();
+        let saved = loaded.get("feat").unwrap();
+        assert_eq!(saved, &meta);
+        assert_eq!(saved.source_branch(), Some("feat"));
+        assert_eq!(saved.target_branch(), Some("main"));
+        assert_eq!(saved.target_repo(), Some("owner/repo"));
+        assert_eq!(saved.comment_id(), Some(35));
     }
 
     fn temp_cr_store() -> (TempDir, SpiceStore) {

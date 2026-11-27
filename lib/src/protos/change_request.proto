@@ -18,6 +18,7 @@ message ForgeMeta {
   oneof forge {
     GitHubMeta github = 10;
     GitLabMeta gitlab = 11;
+    GiteaMeta gitea = 12;
   }
 }
 
@@ -40,4 +41,14 @@ message GitLabMeta {
   string target_branch = 4;                   // base ref (e.g. "main")
   optional uint64 source_project_id = 5;      // fork origin, empty for same-repo
   optional uint64 comment_id = 6;             // comment ID, for updating the stack trace in the Merge Request
+}
+
+// Gitea pull request identity.
+message GiteaMeta {
+  uint64 number = 1;
+  string source_branch = 2;
+  string target_branch = 3;
+  string source_repo = 4;
+  string target_repo = 5;
+  optional uint64 comment_id = 6;
 }
