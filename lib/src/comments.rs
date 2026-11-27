@@ -297,7 +297,8 @@ fn html_escape(s: &str) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
-    use jj_lib::op_store::{LocalRemoteRefTarget, RefTarget};
+    use crate::bookmark::ABSENT_TARGET;
+    use jj_lib::op_store::LocalRemoteRefTarget;
 
     use super::*;
     use crate::bookmark::Bookmark;
@@ -309,7 +310,7 @@ mod tests {
         Bookmark::new(
             name.to_string(),
             LocalRemoteRefTarget {
-                local_target: RefTarget::absent_ref(),
+                local_target: &ABSENT_TARGET,
                 remote_refs: vec![],
             },
         )

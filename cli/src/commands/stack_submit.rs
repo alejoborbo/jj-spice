@@ -2,21 +2,20 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::Write as _;
 use std::sync::Arc;
 
+use futures::TryStreamExt as _;
 use itertools::Itertools;
 use jj_cli::description_util::TextEditor;
 use jj_cli::git_util::{GitSubprocessUi, print_push_stats};
 use jj_cli::ui::Ui;
 use jj_lib::backend::CommitId;
-use jj_lib::commit::Commit;
-use jj_lib::git::{self, GitBranchPushTargets};
+use jj_lib::git::{self, GitPushOptions, GitPushRefTargets};
+use jj_lib::merge::Diff;
 use jj_lib::object_id::ObjectId;
 use jj_lib::ref_name::{RefName, RefNameBuf, RemoteNameBuf};
-use jj_lib::refs::{
-    BookmarkPushAction, BookmarkPushUpdate, LocalAndRemoteRef, classify_bookmark_push_action,
-};
+use jj_lib::refs::{LocalAndRemoteRef, RefPushAction, classify_ref_push_action};
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::revset::ResolvedRevsetExpression;
-use jj_lib::signing::SignBehavior;
+use jj_lib::settings::SignBehavior;
 use jj_spice_lib::bookmark::graph::BookmarkGraph;
 use jj_spice_lib::comments::{Comment, LiveCrData};
 use jj_spice_lib::forge::{CreateParams, Forge};
@@ -29,7 +28,7 @@ use crate::commands::env::SpiceEnv;
 /// Push data collected for a single bookmark during the first pass.
 struct BookmarkPushEntry {
     name: String,
-    push_update: BookmarkPushUpdate,
+    push_update: Diff<Option<CommitId>>,
 }
 
 /// Collected data from the first pass: repo snapshot, push entries, and CR
@@ -73,12 +72,10 @@ pub async fn run(
     let text_editor = TextEditor::from_settings(&env.settings)?;
     let mut state = cr_store.load()?;
 
-    let auto_accept =
-        if let Ok(auto_accept) = env.config().get::<bool>(["spice", "auto-accept-changes"]) {
-            auto_accept
-        } else {
-            args.auto_accept
-        };
+    let auto_accept = env
+        .config()
+        .get(["spice", "auto-accept-changes"])
+        .unwrap_or(args.auto_accept);
 
     // Auto-clean: when enabled, inactive (closed/merged) CRs discovered in
     // local state are automatically removed so a fresh CR can be created.
@@ -94,11 +91,11 @@ pub async fn run(
     // tracked) is then used to classify every bookmark's push action and to
     // validate commits.
     let (repo_for_push, push_entries, cr_metas) =
-        collect_push_data(env, &graph, auto_accept, args.auto_track_bookmarks)?;
+        collect_push_data(env, &graph, auto_accept, args.auto_track_bookmarks).await?;
 
     // ── Batch sign + push (single transaction) ──
     if !push_entries.is_empty() {
-        batch_push(env, &repo_for_push, trunk, push_entries)?;
+        batch_push(env, &repo_for_push, trunk, push_entries).await?;
     }
 
     // ── Pass 2: Create / retarget change requests ──
@@ -165,21 +162,9 @@ pub async fn run(
         let (suggested_title, suggested_body) =
             build_cr_suggestion(env.repo.as_ref(), &meta.commits)?;
 
-        let title_prompt = if suggested_title.is_empty() {
-            "Title".to_string()
-        } else {
-            format!("Title [{}]", suggested_title)
-        };
-        let title = env.ui.prompt_choice_with(
-            &title_prompt,
-            if suggested_title.is_empty() {
-                None
-            } else {
-                Some(suggested_title.as_str())
-            },
-            |input| -> Result<String, &'static str> { Ok(input.to_string()) },
-        )?;
-        let description = text_editor.edit_str(&suggested_body, Some(".md"))?;
+        let title = prompt_title(&env.ui, &suggested_title)?;
+        let description =
+            text_editor.edit_str(&suggested_body, Some(".md"), std::num::NonZeroU32::MIN)?;
         let is_draft = if args.draft {
             true
         } else if args.no_draft {
@@ -217,6 +202,14 @@ pub async fn run(
     cr_store.save(&state)?;
 
     Ok(())
+}
+
+fn prompt_title(ui: &Ui, suggested: &str) -> std::io::Result<String> {
+    let default = Some(suggested).filter(|title| !title.is_empty());
+    let prompt = default.map_or_else(|| "Title".to_owned(), |title| format!("Title [{title}]"));
+    ui.prompt_choice_with(&prompt, default, |input| -> Result<String, &'static str> {
+        Ok(input.to_owned())
+    })
 }
 
 /// Fetch the current branch's base bookmark.
@@ -277,7 +270,7 @@ fn resolve_base_bookmark(
 /// Returns the repo snapshot to use for the batch push (may differ from
 /// `env.repo` if bookmarks were tracked), the list of bookmarks that need
 /// pushing, and the CR metadata for the second pass.
-fn collect_push_data(
+async fn collect_push_data(
     env: &SpiceEnv,
     graph: &BookmarkGraph<'_>,
     auto_accept: bool,
@@ -286,8 +279,8 @@ fn collect_push_data(
     let remote = env.get_default_remote();
 
     // Track all bookmarks that need tracking in a single transaction.
-    let repo_after_track = track_needed_bookmarks(env, graph, &remote, auto_track_bookmark)?;
-    let repo = repo_after_track.unwrap_or_else(|| env.repo.clone());
+    let repo_after_track = track_needed_bookmarks(env, graph, &remote, auto_track_bookmark).await?;
+    let repo = repo_after_track.unwrap_or_else(|| Arc::clone(&env.repo));
 
     let mut push_entries: Vec<BookmarkPushEntry> = Vec::new();
     let mut cr_metas: Vec<BookmarkCrMeta> = Vec::new();
@@ -304,30 +297,23 @@ fn collect_push_data(
         });
 
         // Classify the push action from the (possibly updated) repo view.
-        let push_action = classify_push_for_bookmark(&repo, bookmark.name(), &remote);
-        let push_action = match push_action {
-            Some(a) => a,
-            None => {
-                // No tracked remote ref — nothing to push.
-                if !auto_track_bookmark {
-                    writeln!(
-                        env.ui.hint_default(),
-                        "No remote ref found for bookmark {name}. Run \
-                         `jj bookmark track {name} --remote={remote}` to track it.",
-                        name = bookmark.name(),
-                        remote = remote.as_symbol(),
-                    )?;
-                    return Err(
-                        format!("No remote ref found for bookmark {}", bookmark.name()).into(),
-                    );
-                }
-                continue;
+        let name = bookmark.name();
+        let Some(push_action) = classify_push_for_bookmark(&repo, name, &remote) else {
+            if !auto_track_bookmark {
+                writeln!(
+                    env.ui.hint_default(),
+                    "No remote ref found for bookmark {name}. Run \
+                     `jj bookmark track {name} --remote={}` to track it.",
+                    remote.as_symbol(),
+                )?;
+                return Err(format!("No remote ref found for bookmark {name}").into());
             }
+            continue;
         };
 
         match push_action {
-            BookmarkPushAction::AlreadyMatches => {}
-            BookmarkPushAction::Update(push_update) => {
+            RefPushAction::AlreadyMatches => {}
+            RefPushAction::Update(push_update) => {
                 writeln!(
                     env.ui.warning_default(),
                     "Untracked changes have been detected.",
@@ -375,7 +361,7 @@ fn classify_push_for_bookmark(
     repo: &ReadonlyRepo,
     bookmark_name: &str,
     remote: &RemoteNameBuf,
-) -> Option<BookmarkPushAction> {
+) -> Option<RefPushAction> {
     let view = repo.view();
     let ref_name = RefName::new(bookmark_name);
     let local_target = view.get_local_bookmark(ref_name);
@@ -387,7 +373,7 @@ fn classify_push_for_bookmark(
         return None;
     }
 
-    Some(classify_bookmark_push_action(LocalAndRemoteRef {
+    Some(classify_ref_push_action(LocalAndRemoteRef {
         local_target,
         remote_ref,
     }))
@@ -397,7 +383,7 @@ fn classify_push_for_bookmark(
 ///
 /// Returns `Some(repo)` with the updated state if any bookmarks were tracked,
 /// or `None` if nothing needed tracking.
-fn track_needed_bookmarks(
+async fn track_needed_bookmarks(
     env: &SpiceEnv,
     graph: &BookmarkGraph<'_>,
     remote: &RemoteNameBuf,
@@ -432,7 +418,7 @@ fn track_needed_bookmarks(
     for name in &names_to_track {
         let ref_name = RefName::new(name);
         let symbol = ref_name.to_remote_symbol(remote);
-        tx.repo_mut().track_remote_bookmark(symbol)?;
+        tx.repo_mut().track_remote_bookmark(symbol).await?;
     }
 
     let description = if names_to_track.len() == 1 {
@@ -440,8 +426,7 @@ fn track_needed_bookmarks(
     } else {
         format!("tracked {} bookmarks", names_to_track.len())
     };
-    let repo = tx.commit(description)?;
-    Ok(Some(repo))
+    Ok(Some(tx.commit(description).await?))
 }
 
 /// Remap bookmark push targets after signing rewrites commits.
@@ -451,24 +436,21 @@ fn track_needed_bookmarks(
 /// **all** bookmarks — the previous per-bookmark approach only remapped one,
 /// leaving the rest pointing at stale (unsigned) commit IDs.
 fn remap_push_targets(
-    bookmark_updates: &mut [(RefNameBuf, BookmarkPushUpdate)],
+    bookmark_updates: &mut [(RefNameBuf, Diff<Option<CommitId>>)],
     old_to_new: &HashMap<CommitId, CommitId>,
 ) {
     for (_, update) in bookmark_updates.iter_mut() {
-        if let Some(old_target) = &update.new_target
+        if let Some(old_target) = &update.after
             && let Some(new_id) = old_to_new.get(old_target)
         {
-            update.new_target = Some(new_id.clone());
+            update.after = Some(new_id.clone());
         }
     }
 }
 
-/// Sign all unsigned commits and push all bookmarks in a single transaction.
-///
-/// This mirrors jj's own `sign_commits_before_push` + `push_branches` flow:
-/// all signing, rebasing, and pushing happen within one transaction that is
-/// committed at the end so jj's repo state stays consistent with the remote.
-fn batch_push(
+/// Sign selected commits and push all bookmarks in a single transaction.
+/// Commit the local updates only after the push succeeds.
+async fn batch_push(
     env: &SpiceEnv,
     repo: &Arc<ReadonlyRepo>,
     trunk: &CommitId,
@@ -484,62 +466,58 @@ fn batch_push(
     //    `(old_heads ∪ immutable_heads)..new_heads`.
     let new_heads: Vec<CommitId> = entries
         .iter()
-        .filter_map(|e| e.push_update.new_target.clone())
+        .filter_map(|e| e.push_update.after.clone())
         .collect();
     let range_expr = ResolvedRevsetExpression::commits(vec![trunk.clone()])
         .range(&ResolvedRevsetExpression::commits(new_heads));
     let all_commit_ids: Vec<CommitId> = range_expr
+        .clone()
         .evaluate(tx.repo())?
-        .iter()
-        .collect::<Result<Vec<_>, _>>()?;
-    let commits_to_sign = verify_commits(env, tx.repo(), &all_commit_ids)?;
+        .stream()
+        .try_collect()
+        .await?;
+    verify_commits(tx.repo(), &all_commit_ids)?;
+    let sign_ids: Vec<CommitId> = signing_candidates(env, tx.repo(), &range_expr)?
+        .evaluate(tx.repo())?
+        .stream()
+        .try_collect()
+        .await?;
 
     // Build the initial bookmark update list.
-    let mut bookmark_updates: Vec<(RefNameBuf, BookmarkPushUpdate)> = entries
+    let mut bookmark_updates: Vec<(RefNameBuf, Diff<Option<CommitId>>)> = entries
         .iter()
         .map(|e| (RefNameBuf::from(e.name.as_str()), e.push_update.clone()))
         .collect();
 
-    // 2. Sign all unsigned commits in a single `transform_descendants` call.
+    // 2. Sign the selected commits in a single `transform_descendants` call.
     //    This correctly handles stacked bookmarks: descendants are automatically
     //    rebased onto newly signed parents, so every commit in the stack gets a
     //    consistent lineage.
-    if !commits_to_sign.is_empty() {
-        let sign_ids: Vec<CommitId> = commits_to_sign.iter().map(|c| c.id().clone()).collect();
+    if !sign_ids.is_empty() {
         let sign_id_set: std::collections::HashSet<CommitId> = sign_ids.iter().cloned().collect();
         let mut old_to_new: HashMap<CommitId, CommitId> = HashMap::new();
 
         tx.repo_mut()
             .transform_descendants(sign_ids, async |rewriter| {
                 let old_id = rewriter.old_commit().id().clone();
+                let mut builder = rewriter.reparent();
                 if sign_id_set.contains(&old_id) {
-                    // Commit that needs signing: rewrite with signature.
-                    let new_commit: Commit = rewriter
-                        .reparent()
-                        .set_sign_behavior(SignBehavior::Own)
-                        .write()?;
-                    old_to_new.insert(old_id, new_commit.id().clone());
-                } else {
-                    // Descendant commit: just reparent onto new parents.
-                    let new_commit: Commit = rewriter.reparent().write()?;
-                    old_to_new.insert(old_id, new_commit.id().clone());
+                    builder = builder.set_sign_behavior(SignBehavior::Force);
                 }
+                old_to_new.insert(old_id, builder.write().await?.id().clone());
                 Ok(())
-            })?;
+            })
+            .await?;
 
         // 3. Remap all push targets to the newly signed commit IDs.
         remap_push_targets(&mut bookmark_updates, &old_to_new);
 
-        writeln!(
-            env.ui.status(),
-            "Signed {} commit(s)",
-            commits_to_sign.len()
-        )?;
+        writeln!(env.ui.status(), "Signed {} commit(s)", sign_id_set.len())?;
     }
 
     // 4. Rebase any remaining descendants (clears parent_mapping so the
     //    transaction can be committed without hitting the `has_rewrites` assert).
-    let num_rebased = tx.repo_mut().rebase_descendants()?;
+    let num_rebased = tx.repo_mut().rebase_descendants().await?;
     if num_rebased > 0 {
         writeln!(
             env.ui.status(),
@@ -549,22 +527,24 @@ fn batch_push(
     }
 
     // 5. Push all bookmarks in one call.
-    let targets = GitBranchPushTargets {
-        branch_updates: bookmark_updates,
+    let targets = GitPushRefTargets {
+        bookmarks: bookmark_updates,
+        tags: Vec::new(),
     };
-    let push_stats = git::push_branches(
+    let push_stats = git::push_refs(
         tx.repo_mut(),
         env.git_settings.to_subprocess_options(),
         remote.as_ref(),
         &targets,
         &mut GitSubprocessUi::new(&env.ui),
+        &GitPushOptions::default(),
     )?;
 
     print_push_stats(&env.ui, &push_stats)?;
 
     // 6. Commit the transaction so jj's local state matches the remote.
     if push_stats.all_ok() {
-        tx.commit("push stack bookmarks".to_string())?;
+        tx.commit("push stack bookmarks").await?;
         for entry in &entries {
             writeln!(
                 env.ui.stdout_formatter(),
@@ -749,33 +729,11 @@ async fn get_existing_change_request(
 
 /// Verify commits before pushing them.
 ///
-/// Checks that all commits are ready to push: non-empty description,
-/// author/committer set, and no unresolved conflicts. If `git.sign-on-push`
-/// is configured, collects unsigned commits that need signing.
-///
-/// Mirrors jj's `validate_commits_ready_to_push`.
+/// Requires a description, an author and committer, and a conflict-free tree.
 fn verify_commits(
-    env: &SpiceEnv,
     repo: &dyn jj_lib::repo::Repo,
     commit_ids: &[CommitId],
-) -> Result<Vec<Commit>, Box<dyn std::error::Error>> {
-    let sign_on_push = env
-        .settings
-        .get_bool(["git", "sign-on-push"])
-        .unwrap_or(false);
-    // Override behavior to Own so commits authored by us are signed before
-    // push, regardless of the configured signing.behavior (which may be Drop
-    // for normal operations). Mirrors jj's own git push flow.
-    let sign_settings = if sign_on_push {
-        let mut settings = env.settings.sign_settings();
-        settings.behavior = SignBehavior::Own;
-        Some(settings)
-    } else {
-        None
-    };
-
-    let mut commits_to_sign = vec![];
-
+) -> Result<(), Box<dyn std::error::Error>> {
     for id in commit_ids {
         let commit = repo.store().get_commit(id)?;
         let mut reasons = vec![];
@@ -802,17 +760,21 @@ fn verify_commits(
             )
             .into());
         }
-
-        // Collect commits that need signing before push.
-        if let Some(ref settings) = sign_settings
-            && !commit.is_signed()
-            && settings.should_sign(commit.store_commit())
-        {
-            commits_to_sign.push(commit);
-        }
     }
 
-    Ok(commits_to_sign)
+    Ok(())
+}
+
+/// Restrict signing to commits in the push range that jj considers mutable.
+fn signing_candidates(
+    env: &SpiceEnv,
+    repo: &dyn jj_lib::repo::Repo,
+    push_range: &Arc<ResolvedRevsetExpression>,
+) -> Result<Arc<ResolvedRevsetExpression>, Box<dyn std::error::Error>> {
+    let sign_on_push = env.settings.get_string("revsets.git-sign-on-push")?;
+    let configured = env.resolve_revset_in(repo, &sign_on_push)?;
+    let immutable = env.resolve_revset_in(repo, "::(immutable_heads() | root())")?;
+    Ok(push_range.intersection(&configured).minus(&immutable))
 }
 
 /// Build a suggested title and body for a change request from commit
@@ -880,16 +842,94 @@ mod tests {
     use jj_lib::backend::{
         ChangeId, Commit, CommitId, MillisSinceEpoch, SecureSig, Signature, Timestamp, TreeId,
     };
+    use jj_lib::merge::Diff;
     use jj_lib::merge::Merge;
     use jj_lib::ref_name::RefNameBuf;
-    use jj_lib::refs::BookmarkPushUpdate;
+    use jj_lib::settings::SignBehavior;
     use jj_lib::settings::SignSettings;
-    use jj_lib::signing::SignBehavior;
     use jj_spice_lib::protos::change_request::forge_meta::Forge as ForgeOneof;
     use jj_spice_lib::protos::change_request::{ForgeMeta, GitHubMeta};
 
     use super::remap_push_targets;
     use super::{ResolvedBaseBookmark, resolve_base_bookmark};
+
+    use crate::commands::env::test_repo;
+
+    async fn sign_and_push(colocated: bool) -> bool {
+        use jj_lib::op_store::RefTarget;
+        use jj_lib::ref_name::RefName;
+        use jj_lib::repo::Repo as _;
+
+        let origin_path = tempfile::tempdir().unwrap();
+        let local_path = tempfile::tempdir().unwrap();
+        let origin = test_repo::init(origin_path.path(), true).await;
+        let mut local = test_repo::init(local_path.path(), colocated).await;
+        let root = local.repo.store().root_commit_id().clone();
+        let feature = RefName::new("feature");
+        let mut tx = local.repo.start_transaction();
+        test_repo::add_origin(tx.repo_mut(), &origin);
+        let base = test_repo::commit(tx.repo_mut(), &root, "base").await;
+        let tip = test_repo::commit(tx.repo_mut(), base.id(), "feature").await;
+        tx.repo_mut()
+            .set_local_bookmark_target(feature, RefTarget::normal(tip.id().clone()));
+        tx.repo_mut()
+            .set_wc_commit(
+                local.workspace.workspace_name().to_owned(),
+                tip.id().clone(),
+            )
+            .unwrap();
+        let repo = tx.commit("Build stack").await.unwrap();
+        local
+            .workspace
+            .check_out(repo.op_id().clone(), None, &tip)
+            .await
+            .unwrap();
+
+        let local = test_repo::open(
+            local_path.path(),
+            &["revsets.git-sign-on-push='description(feature)'"],
+        );
+        let entries = vec![super::BookmarkPushEntry {
+            name: feature.as_str().to_owned(),
+            push_update: Diff {
+                before: None,
+                after: Some(tip.id().clone()),
+            },
+        }];
+        super::batch_push(&local, &local.repo, &root, entries)
+            .await
+            .unwrap();
+        let local = test_repo::open(local_path.path(), &[]);
+        let signed_id = local
+            .repo
+            .view()
+            .get_local_bookmark(feature)
+            .as_normal()
+            .unwrap();
+        let signed = local.repo.store().get_commit(signed_id).unwrap();
+        assert!(signed.is_signed());
+        assert_eq!(signed.change_id(), tip.change_id());
+        assert_eq!(signed.parent_ids(), [base.id().clone()]);
+        assert_eq!(
+            local
+                .repo
+                .view()
+                .get_wc_commit_id(local.workspace.workspace_name()),
+            Some(signed.id())
+        );
+        test_repo::is_fresh(&local, &local.repo, &signed).await
+    }
+
+    #[tokio::test]
+    async fn signing_revset_selects_commits_without_leaving_a_stale_tree() {
+        let colocated = sign_and_push(true).await;
+        let internal_git = sign_and_push(false).await;
+        assert_eq!(
+            (colocated, internal_git),
+            (true, true),
+            "fresh working copy (colocated, non-colocated)"
+        );
+    }
 
     /// Build a minimal `backend::Commit` for sign-settings tests.
     fn make_commit(email: &str, signed: bool) -> Commit {
@@ -926,7 +966,6 @@ mod tests {
         SignSettings {
             behavior,
             user_email: email.into(),
-            key: None,
         }
     }
 
@@ -1109,16 +1148,16 @@ mod tests {
         let mut updates = vec![
             (
                 RefNameBuf::from("bookmark-a"),
-                BookmarkPushUpdate {
-                    old_target: None,
-                    new_target: Some(cid(0xAA)),
+                Diff {
+                    before: None,
+                    after: Some(cid(0xAA)),
                 },
             ),
             (
                 RefNameBuf::from("bookmark-b"),
-                BookmarkPushUpdate {
-                    old_target: None,
-                    new_target: Some(cid(0xBB)),
+                Diff {
+                    before: None,
+                    after: Some(cid(0xBB)),
                 },
             ),
         ];
@@ -1131,8 +1170,8 @@ mod tests {
         remap_push_targets(&mut updates, &old_to_new);
 
         // Both bookmarks must be remapped.
-        assert_eq!(updates[0].1.new_target, Some(cid(0xA1)));
-        assert_eq!(updates[1].1.new_target, Some(cid(0xB1)));
+        assert_eq!(updates[0].1.after, Some(cid(0xA1)));
+        assert_eq!(updates[1].1.after, Some(cid(0xB1)));
     }
 
     #[test]
@@ -1141,16 +1180,16 @@ mod tests {
         let mut updates = vec![
             (
                 RefNameBuf::from("bookmark-a"),
-                BookmarkPushUpdate {
-                    old_target: None,
-                    new_target: Some(cid(0xAA)),
+                Diff {
+                    before: None,
+                    after: Some(cid(0xAA)),
                 },
             ),
             (
                 RefNameBuf::from("bookmark-b"),
-                BookmarkPushUpdate {
-                    old_target: None,
-                    new_target: Some(cid(0xBB)),
+                Diff {
+                    before: None,
+                    after: Some(cid(0xBB)),
                 },
             ),
         ];
@@ -1161,9 +1200,9 @@ mod tests {
 
         remap_push_targets(&mut updates, &old_to_new);
 
-        assert_eq!(updates[0].1.new_target, Some(cid(0xA1)));
+        assert_eq!(updates[0].1.after, Some(cid(0xA1)));
         // bookmark-b's target should remain unchanged.
-        assert_eq!(updates[1].1.new_target, Some(cid(0xBB)));
+        assert_eq!(updates[1].1.after, Some(cid(0xBB)));
     }
 
     #[test]
@@ -1171,9 +1210,9 @@ mod tests {
         // A bookmark being deleted (new_target = None) should not panic.
         let mut updates = vec![(
             RefNameBuf::from("deleted-bookmark"),
-            BookmarkPushUpdate {
-                old_target: Some(cid(0xAA)),
-                new_target: None,
+            Diff {
+                before: Some(cid(0xAA)),
+                after: None,
             },
         )];
 
@@ -1183,22 +1222,22 @@ mod tests {
         remap_push_targets(&mut updates, &old_to_new);
 
         // new_target remains None (delete).
-        assert_eq!(updates[0].1.new_target, None);
+        assert_eq!(updates[0].1.after, None);
     }
 
     #[test]
     fn remap_targets_empty_map_is_noop() {
         let mut updates = vec![(
             RefNameBuf::from("bookmark"),
-            BookmarkPushUpdate {
-                old_target: None,
-                new_target: Some(cid(0xAA)),
+            Diff {
+                before: None,
+                after: Some(cid(0xAA)),
             },
         )];
 
         remap_push_targets(&mut updates, &HashMap::new());
 
-        assert_eq!(updates[0].1.new_target, Some(cid(0xAA)));
+        assert_eq!(updates[0].1.after, Some(cid(0xAA)));
     }
 
     #[test]
@@ -1207,23 +1246,23 @@ mod tests {
         let mut updates = vec![
             (
                 RefNameBuf::from("a"),
-                BookmarkPushUpdate {
-                    old_target: None,
-                    new_target: Some(cid(1)),
+                Diff {
+                    before: None,
+                    after: Some(cid(1)),
                 },
             ),
             (
                 RefNameBuf::from("b"),
-                BookmarkPushUpdate {
-                    old_target: None,
-                    new_target: Some(cid(2)),
+                Diff {
+                    before: None,
+                    after: Some(cid(2)),
                 },
             ),
             (
                 RefNameBuf::from("c"),
-                BookmarkPushUpdate {
-                    old_target: None,
-                    new_target: Some(cid(3)),
+                Diff {
+                    before: None,
+                    after: Some(cid(3)),
                 },
             ),
         ];
@@ -1235,9 +1274,9 @@ mod tests {
 
         remap_push_targets(&mut updates, &old_to_new);
 
-        assert_eq!(updates[0].1.new_target, Some(cid(11)));
-        assert_eq!(updates[1].1.new_target, Some(cid(22)));
-        assert_eq!(updates[2].1.new_target, Some(cid(33)));
+        assert_eq!(updates[0].1.after, Some(cid(11)));
+        assert_eq!(updates[1].1.after, Some(cid(22)));
+        assert_eq!(updates[2].1.after, Some(cid(33)));
     }
 
     // -- test the base bookmark selection

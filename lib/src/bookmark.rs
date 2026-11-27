@@ -3,6 +3,10 @@ use jj_lib::op_store::LocalRemoteRefTarget;
 use jj_lib::ref_name::RemoteNameBuf;
 use jj_lib::refs::LocalAndRemoteRef;
 
+#[cfg(test)]
+pub(crate) static ABSENT_TARGET: jj_lib::op_store::RefTarget =
+    jj_lib::op_store::RefTarget::absent();
+
 /// DAG of bookmarks between trunk and head for stack operations.
 pub mod graph;
 
@@ -11,11 +15,11 @@ pub mod graph;
 ///
 /// jj's `trunk()` revset resolves via `remote_bookmarks()` so a local
 /// bookmark is never required.  This helper follows the same semantics:
-/// when the local target is absent it returns the first available remote
-/// ref's commit instead.
+/// when the local target is absent it returns the first normal remote target.
+/// A conflicted local target does not fall back to a remote.
 pub fn resolve_commit_id<'a>(target: &'a LocalRemoteRefTarget<'_>) -> Option<&'a CommitId> {
-    if let Some(id) = target.local_target.as_normal() {
-        return Some(id);
+    if target.local_target.is_present() {
+        return target.local_target.as_normal();
     }
     target
         .remote_refs
@@ -125,7 +129,7 @@ mod tests {
 
     fn absent_target() -> LocalRemoteRefTarget<'static> {
         LocalRemoteRefTarget {
-            local_target: RefTarget::absent_ref(),
+            local_target: &ABSENT_TARGET,
             remote_refs: vec![],
         }
     }
@@ -168,7 +172,7 @@ mod tests {
         let origin_ref = make_remote_ref(true);
         let upstream_ref = make_remote_ref(false);
         let target = LocalRemoteRefTarget {
-            local_target: RefTarget::absent_ref(),
+            local_target: &ABSENT_TARGET,
             remote_refs: vec![
                 (RemoteName::new("origin"), &origin_ref),
                 (RemoteName::new("upstream"), &upstream_ref),
@@ -188,7 +192,7 @@ mod tests {
         let upstream_ref = make_remote_ref(false);
         let fork_ref = make_remote_ref(true);
         let target = LocalRemoteRefTarget {
-            local_target: RefTarget::absent_ref(),
+            local_target: &ABSENT_TARGET,
             remote_refs: vec![
                 (RemoteName::new("origin"), &origin_ref),
                 (RemoteName::new("upstream"), &upstream_ref),
@@ -205,7 +209,7 @@ mod tests {
         let origin_ref = make_remote_ref(false);
         let upstream_ref = make_remote_ref(false);
         let target = LocalRemoteRefTarget {
-            local_target: RefTarget::absent_ref(),
+            local_target: &ABSENT_TARGET,
             remote_refs: vec![
                 (RemoteName::new("origin"), &origin_ref),
                 (RemoteName::new("upstream"), &upstream_ref),
@@ -228,14 +232,14 @@ mod tests {
         let a = Bookmark::new(
             "feat".into(),
             LocalRemoteRefTarget {
-                local_target: RefTarget::absent_ref(),
+                local_target: &ABSENT_TARGET,
                 remote_refs: vec![(RemoteName::new("origin"), &origin_ref)],
             },
         );
         let b = Bookmark::new(
             "feat".into(),
             LocalRemoteRefTarget {
-                local_target: RefTarget::absent_ref(),
+                local_target: &ABSENT_TARGET,
                 remote_refs: vec![(RemoteName::new("upstream"), &upstream_ref)],
             },
         );
@@ -256,14 +260,14 @@ mod tests {
         let a = Bookmark::new(
             "feat".into(),
             LocalRemoteRefTarget {
-                local_target: RefTarget::absent_ref(),
+                local_target: &ABSENT_TARGET,
                 remote_refs: vec![(RemoteName::new("origin"), &origin_ref)],
             },
         );
         let b = Bookmark::new(
             "feat".into(),
             LocalRemoteRefTarget {
-                local_target: RefTarget::absent_ref(),
+                local_target: &ABSENT_TARGET,
                 remote_refs: vec![(RemoteName::new("upstream"), &upstream_ref)],
             },
         );
@@ -291,7 +295,7 @@ mod tests {
         let id = commit_id(2);
         let remote = make_remote_ref_at(&id, true);
         let target = LocalRemoteRefTarget {
-            local_target: RefTarget::absent_ref(),
+            local_target: &ABSENT_TARGET,
             remote_refs: vec![(RemoteName::new("origin"), &remote)],
         };
         assert_eq!(resolve_commit_id(&target), Some(&id));
@@ -302,7 +306,7 @@ mod tests {
         let id = commit_id(3);
         let remote = make_remote_ref_at(&id, false);
         let target = LocalRemoteRefTarget {
-            local_target: RefTarget::absent_ref(),
+            local_target: &ABSENT_TARGET,
             remote_refs: vec![(RemoteName::new("origin"), &remote)],
         };
         assert_eq!(resolve_commit_id(&target), Some(&id));
@@ -322,6 +326,17 @@ mod tests {
     }
 
     #[test]
+    fn resolve_commit_id_does_not_hide_a_delete_move_conflict() {
+        let local = RefTarget::from_removes_adds([Some(commit_id(1))], [None, Some(commit_id(2))]);
+        let remote = make_remote_ref_at(&commit_id(3), true);
+        let target = LocalRemoteRefTarget {
+            local_target: &local,
+            remote_refs: vec![(RemoteName::new("origin"), &remote)],
+        };
+        assert_eq!(resolve_commit_id(&target), None);
+    }
+
+    #[test]
     fn resolve_commit_id_returns_none_when_all_absent() {
         assert_eq!(resolve_commit_id(&absent_target()), None);
     }
@@ -332,7 +347,7 @@ mod tests {
         let absent_remote = make_remote_ref(true); // absent target
         let present_remote = make_remote_ref_at(&id, true);
         let target = LocalRemoteRefTarget {
-            local_target: RefTarget::absent_ref(),
+            local_target: &ABSENT_TARGET,
             remote_refs: vec![
                 (RemoteName::new("origin"), &absent_remote),
                 (RemoteName::new("upstream"), &present_remote),
